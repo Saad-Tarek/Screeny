@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.screeny.archiver</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/opt/homebrew/bin/python3</string>
+        <string>/Users/Noha/Desktop/screeny/session_archiver.py</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/Noha/Desktop/screeny</string>
+
+    <!-- Unbuffered output so the log shows "sent" lines in real time -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PYTHONUNBUFFERED</key>
+        <string>1</string>
+    </dict>
+
+    <!-- Start automatically when you log in -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Restart it if it ever stops/crashes, so you can truly forget it -->
+    <key>KeepAlive</key>
+    <true/>
+
+    <!-- Throttle restarts to once every 30s to avoid rapid crash loops -->
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+
+    <!-- Logs (handy if something looks off) -->
+    <key>StandardOutPath</key>
+    <string>/Users/Noha/Desktop/screeny/archiver.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/Noha/Desktop/screeny/archiver.log</string>
+</dict>
+</plist>
