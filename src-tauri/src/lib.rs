@@ -7,7 +7,8 @@ use std::sync::Arc;
 use tauri::{Manager, WindowEvent};
 use tracing::info;
 
-use screeny_core::{capture, Config, Engine, Store};
+use screeny_core::{capture, Config, Engine, EngineOptions, KeyringStore, Store};
+use tauri_plugin_autostart::MacosLauncher;
 
 pub fn run() {
     tracing_subscriber::fmt()
@@ -26,6 +27,10 @@ pub fn run() {
             }
         }))
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_autostart::init(
+            MacosLauncher::LaunchAgent,
+            None,
+        ))
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
@@ -38,13 +43,15 @@ pub fn run() {
             // Engine::start spawns tokio tasks, and Tauri's setup hook runs
             // outside the runtime context — enter it explicitly.
             let engine = tauri::async_runtime::block_on(async {
-                Engine::start(
+                Engine::start(EngineOptions {
                     config,
                     config_path,
                     data_dir,
                     store,
-                    Arc::new(capture::capture_primary),
-                )
+                    capture_fn: Arc::new(capture::capture_primary),
+                    secrets: Arc::new(KeyringStore),
+                    sink_factory: None,
+                })
             });
 
             app.manage(engine.clone());
@@ -66,6 +73,11 @@ pub fn run() {
             commands::set_run_state,
             commands::capture_now,
             commands::list_captures,
+            commands::set_email_password,
+            commands::email_password_set,
+            commands::test_email,
+            commands::get_autostart,
+            commands::set_autostart,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

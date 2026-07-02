@@ -110,6 +110,30 @@ impl Store {
         Ok(count)
     }
 
+    /// Record the outcome of one delivery attempt for a batch of captures.
+    pub fn record_delivery(
+        &self,
+        capture_ids: &[i64],
+        sink: &str,
+        status: &str,
+        error: Option<&str>,
+    ) -> Result<()> {
+        let mut conn = self.conn.lock().expect("store mutex poisoned");
+        let tx = conn.transaction()?;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT INTO deliveries (capture_id, sink, status, error, attempted_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+            )?;
+            let now = Utc::now().to_rfc3339();
+            for id in capture_ids {
+                stmt.execute(params![id, sink, status, error, now])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Delete capture rows older than the cutoff and return the image paths
     /// the caller should remove from disk.
     pub fn prune_older_than(&self, cutoff: DateTime<Utc>) -> Result<Vec<String>> {

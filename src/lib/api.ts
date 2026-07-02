@@ -8,9 +8,27 @@ export interface CaptureConfig {
   start_on_launch: boolean;
 }
 
+export type SmtpSecurity = "ssl" | "starttls";
+
+export interface EmailConfig {
+  enabled: boolean;
+  smtp_host: string;
+  smtp_port: number;
+  security: SmtpSecurity;
+  username: string;
+  from: string;
+  to: string;
+  batch_size: number;
+}
+
+export interface ChannelsConfig {
+  email: EmailConfig;
+}
+
 export interface Config {
   version: number;
   capture: CaptureConfig;
+  channels: ChannelsConfig;
 }
 
 export interface CaptureRow {
@@ -31,11 +49,15 @@ export interface Status {
   total_captures: number;
 }
 
+export type SinkKind = "email";
+
 export type CoreEvent =
   | { type: "capture_taken"; data: CaptureRow }
   | { type: "capture_failed"; data: { message: string } }
   | { type: "state_changed"; data: { state: RunState } }
-  | { type: "config_changed"; data: Config };
+  | { type: "config_changed"; data: Config }
+  | { type: "delivery_succeeded"; data: { sink: SinkKind; count: number } }
+  | { type: "delivery_failed"; data: { sink: SinkKind; message: string } };
 
 export const api = {
   getConfig: () => invoke<Config>("get_config"),
@@ -45,4 +67,10 @@ export const api = {
   captureNow: () => invoke<void>("capture_now"),
   listCaptures: (limit?: number, beforeId?: number) =>
     invoke<CaptureRow[]>("list_captures", { limit, beforeId }),
+  setEmailPassword: (password: string) =>
+    invoke<void>("set_email_password", { password }),
+  emailPasswordSet: () => invoke<boolean>("email_password_set"),
+  testEmail: (config: Config) => invoke<void>("test_email", { config }),
+  getAutostart: () => invoke<boolean>("get_autostart"),
+  setAutostart: (enabled: boolean) => invoke<void>("set_autostart", { enabled }),
 };

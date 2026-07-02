@@ -8,6 +8,8 @@
 
   let captures = $state<CaptureRow[]>([]);
   let lastError = $state<string | null>(null);
+  let deliveryError = $state<string | null>(null);
+  let lastDelivery = $state<string | null>(null);
   let loadingMore = $state(false);
   let reachedEnd = $state(false);
   let capturing = $state(false);
@@ -74,6 +76,11 @@
         lastError = null;
       } else if (core.type === "capture_failed") {
         lastError = core.data.message;
+      } else if (core.type === "delivery_failed") {
+        deliveryError = `${core.data.sink}: ${core.data.message}`;
+      } else if (core.type === "delivery_succeeded") {
+        deliveryError = null;
+        lastDelivery = `Sent ${core.data.count} capture${core.data.count > 1 ? "s" : ""} via ${core.data.sink}`;
       }
     }).then((fn) => (unlisten = fn));
     return () => unlisten?.();
@@ -91,6 +98,13 @@
   <div class="error">
     Capture problem: {lastError}
   </div>
+{/if}
+{#if deliveryError}
+  <div class="error">
+    Delivery problem — captures stay safe locally. {deliveryError}
+  </div>
+{:else if lastDelivery}
+  <div class="notice">{lastDelivery}</div>
 {/if}
 
 {#if captures.length === 0 && !loadingMore}
@@ -160,6 +174,15 @@
     background: #3a1d20;
     border: 1px solid #74343c;
     color: #f2b8bf;
+    border-radius: 8px;
+    padding: 10px 14px;
+    margin-bottom: 16px;
+    font-size: 14px;
+  }
+  .notice {
+    background: #16281d;
+    border: 1px solid #2b5a3c;
+    color: #a3dcb6;
     border-radius: 8px;
     padding: 10px 14px;
     margin-bottom: 16px;

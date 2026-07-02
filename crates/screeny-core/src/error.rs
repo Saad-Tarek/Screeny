@@ -19,6 +19,12 @@ pub enum CoreError {
 
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
+
+    #[error("secret storage error: {0}")]
+    Secret(String),
+
+    #[error("delivery failed via {sink}: {message}")]
+    Delivery { sink: String, message: String },
 }
 
 pub type Result<T> = std::result::Result<T, CoreError>;

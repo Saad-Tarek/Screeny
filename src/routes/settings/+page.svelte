@@ -8,29 +8,47 @@
   let error = $state<string | null>(null);
   let keepForever = $state(false);
 
+  let passwordInput = $state("");
+  let passwordSaved = $state(false);
+  let autostart = $state(false);
+  let testState = $state<"idle" | "sending" | "ok" | "failed">("idle");
+  let testError = $state<string | null>(null);
+
   onMount(async () => {
     try {
       const loaded = await api.getConfig();
       keepForever = loaded.capture.retention_days === null;
       config = loaded;
+      passwordSaved = await api.emailPasswordSet();
+      autostart = await api.getAutostart();
     } catch (e) {
       error = String(e);
     }
   });
 
+  function pendingConfig(): Config | null {
+    if (!config) return null;
+    return {
+      ...config,
+      capture: {
+        ...config.capture,
+        retention_days: keepForever ? null : (config.capture.retention_days ?? 30),
+      },
+    };
+  }
+
   async function save(event: Event) {
     event.preventDefault();
-    if (!config) return;
+    const toSave = pendingConfig();
+    if (!toSave) return;
     saving = true;
     error = null;
     try {
-      const toSave: Config = {
-        ...config,
-        capture: {
-          ...config.capture,
-          retention_days: keepForever ? null : (config.capture.retention_days ?? 30),
-        },
-      };
+      if (passwordInput.trim()) {
+        await api.setEmailPassword(passwordInput);
+        passwordInput = "";
+        passwordSaved = true;
+      }
       config = await api.setConfig(toSave);
       keepForever = config.capture.retention_days === null;
       savedAt = Date.now();
@@ -38,6 +56,35 @@
       error = String(e);
     } finally {
       saving = false;
+    }
+  }
+
+  async function toggleAutostart() {
+    try {
+      await api.setAutostart(autostart);
+    } catch (e) {
+      error = String(e);
+      autostart = !autostart;
+    }
+  }
+
+  async function sendTest() {
+    const pending = pendingConfig();
+    if (!pending) return;
+    testState = "sending";
+    testError = null;
+    try {
+      // Save a freshly typed password first so the test uses it.
+      if (passwordInput.trim()) {
+        await api.setEmailPassword(passwordInput);
+        passwordInput = "";
+        passwordSaved = true;
+      }
+      await api.testEmail(pending);
+      testState = "ok";
+    } catch (e) {
+      testState = "failed";
+      testError = String(e);
     }
   }
 </script>
@@ -113,6 +160,93 @@
       {/if}
     </section>
 
+    <section>
+      <h2>Email delivery</h2>
+
+      <label class="field row">
+        <input type="checkbox" bind:checked={config.channels.email.enabled} />
+        <span>Email each capture batch</span>
+      </label>
+
+      {#if config.channels.email.enabled}
+        <div class="grid-2">
+          <label class="field">
+            <span>SMTP host</span>
+            <input type="text" placeholder="smtp.gmail.com" bind:value={config.channels.email.smtp_host} />
+          </label>
+          <label class="field">
+            <span>Port</span>
+            <input type="number" min="1" max="65535" bind:value={config.channels.email.smtp_port} />
+          </label>
+        </div>
+
+        <label class="field">
+          <span>Connection security</span>
+          <select bind:value={config.channels.email.security}>
+            <option value="ssl">SSL / TLS (port 465)</option>
+            <option value="starttls">STARTTLS (port 587)</option>
+          </select>
+        </label>
+
+        <label class="field">
+          <span>Username</span>
+          <input type="text" placeholder="you@gmail.com" bind:value={config.channels.email.username} />
+        </label>
+
+        <label class="field">
+          <span>Password {passwordSaved ? "(saved in system keychain)" : ""}</span>
+          <input
+            type="password"
+            placeholder={passwordSaved ? "••••••••  — type to replace" : "App password"}
+            bind:value={passwordInput}
+          />
+          <small>
+            For Gmail, create an App Password (requires 2-Step Verification).
+            Stored in your OS keychain, never in a file.
+          </small>
+        </label>
+
+        <div class="grid-2">
+          <label class="field">
+            <span>From address</span>
+            <input type="email" placeholder="you@gmail.com" bind:value={config.channels.email.from} />
+          </label>
+          <label class="field">
+            <span>To address</span>
+            <input type="email" placeholder="you@gmail.com" bind:value={config.channels.email.to} />
+          </label>
+        </div>
+
+        <label class="field">
+          <span>Screenshots per email: {config.channels.email.batch_size}</span>
+          <input type="range" min="1" max="60" bind:value={config.channels.email.batch_size} />
+          <small>
+            Raise this to bundle shots and stay under provider limits
+            (Gmail allows ~500 emails/day).
+          </small>
+        </label>
+
+        <div class="test-row">
+          <button type="button" class="secondary" onclick={sendTest} disabled={testState === "sending"}>
+            {testState === "sending" ? "Sending…" : "Send test email"}
+          </button>
+          {#if testState === "ok"}
+            <span class="saved">Test sent ✓ — check your inbox</span>
+          {:else if testState === "failed"}
+            <span class="test-failed">{testError}</span>
+          {/if}
+        </div>
+      {/if}
+    </section>
+
+    <section>
+      <h2>System</h2>
+      <label class="field row">
+        <input type="checkbox" bind:checked={autostart} onchange={toggleAutostart} />
+        <span>Start Screeny automatically at login</span>
+      </label>
+    </section>
+
     <div class="actions">
       <button type="submit" class="primary" disabled={saving}>
         {saving ? "Saving…" : "Save settings"}
@@ -167,6 +301,36 @@
   .field small {
     color: #7c8598;
   }
+  .grid-2 {
+    display: grid;
+    grid-template-columns: 2fr 1fr;
+    gap: 10px;
+  }
+  .test-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+  .secondary {
+    background: #1f2430;
+    color: #aab2c3;
+    border: 1px solid #2c3342;
+    border-radius: 8px;
+    padding: 8px 14px;
+    font-size: 14px;
+    cursor: pointer;
+  }
+  .secondary:hover:not(:disabled) {
+    color: #e6e8ee;
+  }
+  .test-failed {
+    color: #f2b8bf;
+    font-size: 13px;
+  }
+  input[type="text"],
+  input[type="email"],
+  input[type="password"],
   input[type="number"],
   select {
     background: #10131a;
