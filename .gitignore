@@ -8,3 +8,20 @@ __pycache__/
 .impeccable/
 .claude/*
 !.claude/settings.local.json
+
+# Rust
+/target/
+
+# Node / SvelteKit
+node_modules/
+/build/
+/.svelte-kit/
+vite.config.js.timestamp-*
+
+# Tauri
+/src-tauri/target/
+/src-tauri/gen/
+
+# Bundled app icons are committed on purpose
+!src-tauri/icons/*.png
+!static/*.png
