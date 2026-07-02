@@ -6,4 +6,5 @@ SessionArchive/
 __pycache__/
 .DS_Store
 .impeccable/
-.claude/
+.claude/*
+!.claude/settings.local.json
