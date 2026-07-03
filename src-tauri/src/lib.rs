@@ -31,6 +31,7 @@ pub fn run() {
             MacosLauncher::LaunchAgent,
             None,
         ))
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
@@ -85,6 +86,10 @@ pub fn run() {
             commands::search_captures,
             commands::set_llm_api_key,
             commands::llm_api_key_set,
+            commands::set_telegram_token,
+            commands::telegram_token_set,
+            commands::test_telegram,
+            commands::telegram_discover_chats,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

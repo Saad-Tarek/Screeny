@@ -36,6 +36,10 @@ pub struct CaptureRow {
     /// AI description when analyzed (populated by list/search queries).
     #[serde(default)]
     pub description: Option<String>,
+    /// Latest delivery outcome per sink, e.g. "email:sent,telegram:failed"
+    /// (populated by list/search queries).
+    #[serde(default)]
+    pub delivery_summary: Option<String>,
 }
 
 impl Store {
@@ -78,6 +82,7 @@ impl Store {
             height: new.height,
             status: "captured".into(),
             description: None,
+            delivery_summary: None,
         })
     }
 
@@ -116,22 +121,33 @@ impl Store {
             height: r.get(5)?,
             status: r.get(6)?,
             description: r.get(7)?,
+            delivery_summary: r.get(8)?,
         })
     }
+
+    /// Correlated subquery selecting the latest delivery status per sink.
+    const DELIVERY_SUMMARY_SQL: &'static str = "(
+        SELECT group_concat(d.sink || ':' || d.status)
+        FROM deliveries d
+        WHERE d.capture_id = c.id
+          AND d.id = (SELECT MAX(d2.id) FROM deliveries d2
+                      WHERE d2.capture_id = c.id AND d2.sink = d.sink)
+    )";
 
     /// Newest-first page. Pass `before_id` from the previous page's last row
     /// to paginate.
     pub fn list_captures(&self, limit: u32, before_id: Option<i64>) -> Result<Vec<CaptureRow>> {
         let conn = self.conn.lock().expect("store mutex poisoned");
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare(&format!(
             "SELECT c.id, c.taken_at, c.path, c.monitor, c.width, c.height, c.status,
-                    a.description
+                    a.description, {} AS delivery_summary
              FROM captures c
              LEFT JOIN analyses a ON a.capture_id = c.id
              WHERE (?1 IS NULL OR c.id < ?1)
              ORDER BY c.id DESC
              LIMIT ?2",
-        )?;
+            Self::DELIVERY_SUMMARY_SQL
+        ))?;
         let rows = stmt
             .query_map(params![before_id, limit], Self::row_from)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -150,16 +166,17 @@ impl Store {
             return Ok(Vec::new());
         }
         let conn = self.conn.lock().expect("store mutex poisoned");
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare(&format!(
             "SELECT c.id, c.taken_at, c.path, c.monitor, c.width, c.height, c.status,
-                    a.description
+                    a.description, {} AS delivery_summary
              FROM captures_fts f
              JOIN captures c ON c.id = f.rowid
              LEFT JOIN analyses a ON a.capture_id = c.id
              WHERE captures_fts MATCH ?1
              ORDER BY c.id DESC
              LIMIT ?2",
-        )?;
+            Self::DELIVERY_SUMMARY_SQL
+        ))?;
         let rows = stmt
             .query_map(params![fts_query, limit], Self::row_from)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -277,6 +294,29 @@ mod tests {
             .search_captures("\"unbalanced OR (", 10)
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn delivery_summary_reflects_latest_status_per_sink() {
+        let store = Store::open_in_memory().unwrap();
+        let row = store
+            .insert_capture(&capture_at(Utc::now(), "a.jpg"))
+            .unwrap();
+        store
+            .record_delivery(&[row.id], "email", "failed", Some("boom"))
+            .unwrap();
+        store
+            .record_delivery(&[row.id], "email", "sent", None)
+            .unwrap();
+        store
+            .record_delivery(&[row.id], "telegram", "failed", Some("nope"))
+            .unwrap();
+
+        let listed = store.list_captures(1, None).unwrap();
+        let summary = listed[0].delivery_summary.as_deref().unwrap();
+        assert!(summary.contains("email:sent"), "got {summary}");
+        assert!(summary.contains("telegram:failed"), "got {summary}");
+        assert!(!summary.contains("email:failed"), "got {summary}");
     }
 
     #[test]

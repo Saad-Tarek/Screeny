@@ -22,8 +22,15 @@ export interface EmailConfig {
   content: ContentMode;
 }
 
+export interface TelegramConfig {
+  enabled: boolean;
+  chat_id: string;
+  content: ContentMode;
+}
+
 export interface ChannelsConfig {
   email: EmailConfig;
+  telegram: TelegramConfig;
 }
 
 export type ContentMode = "image" | "analysis" | "both";
@@ -54,6 +61,7 @@ export interface CaptureRow {
   height: number;
   status: string;
   description: string | null;
+  delivery_summary: string | null;
 }
 
 export type RunState = "running" | "paused";
@@ -64,15 +72,26 @@ export interface Status {
   total_captures: number;
 }
 
-export type SinkKind = "email";
+export type SinkKind = "email" | "telegram";
+
+export interface DiscoveredChat {
+  id: number;
+  label: string;
+}
 
 export type CoreEvent =
   | { type: "capture_taken"; data: CaptureRow }
   | { type: "capture_failed"; data: { message: string } }
   | { type: "state_changed"; data: { state: RunState } }
   | { type: "config_changed"; data: Config }
-  | { type: "delivery_succeeded"; data: { sink: SinkKind; count: number } }
-  | { type: "delivery_failed"; data: { sink: SinkKind; message: string } }
+  | {
+      type: "delivery_succeeded";
+      data: { sink: SinkKind; count: number; capture_ids: number[] };
+    }
+  | {
+      type: "delivery_failed";
+      data: { sink: SinkKind; message: string; capture_ids: number[] };
+    }
   | { type: "analysis_completed"; data: { capture_id: number; description: string } }
   | { type: "analysis_failed"; data: { capture_id: number; message: string } }
   | { type: "analysis_skipped"; data: { capture_id: number } };
@@ -110,6 +129,10 @@ export const api = {
     invoke<CaptureRow[]>("search_captures", { query, limit }),
   setLlmApiKey: (key: string) => invoke<void>("set_llm_api_key", { key }),
   llmApiKeySet: () => invoke<boolean>("llm_api_key_set"),
+  setTelegramToken: (token: string) => invoke<void>("set_telegram_token", { token }),
+  telegramTokenSet: () => invoke<boolean>("telegram_token_set"),
+  testTelegram: (config: Config) => invoke<void>("test_telegram", { config }),
+  telegramDiscoverChats: () => invoke<DiscoveredChat[]>("telegram_discover_chats"),
 };
 
 /** Model suggestions for the onboarding wizard and settings (Ollama tags). */

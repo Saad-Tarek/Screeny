@@ -145,10 +145,31 @@ impl Default for EmailConfig {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TelegramConfig {
+    pub enabled: bool,
+    /// Target chat. The bot token lives in the OS keychain, never here.
+    pub chat_id: String,
+    /// Send the screenshot, the AI analysis text, or both.
+    pub content: ContentMode,
+}
+
+impl Default for TelegramConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            chat_id: String::new(),
+            content: ContentMode::Image,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ChannelsConfig {
     pub email: EmailConfig,
+    pub telegram: TelegramConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -202,10 +223,14 @@ impl Config {
             model: self.llm.model.trim().to_string(),
             ..self.llm.clone()
         };
+        let telegram = TelegramConfig {
+            chat_id: self.channels.telegram.chat_id.trim().to_string(),
+            ..self.channels.telegram.clone()
+        };
         Config {
             version: CONFIG_VERSION,
             capture,
-            channels: ChannelsConfig { email },
+            channels: ChannelsConfig { email, telegram },
             llm,
             onboarding_complete: self.onboarding_complete,
         }
@@ -264,6 +289,11 @@ mod tests {
                     batch_size: 30,
                     content: ContentMode::Both,
                 },
+                telegram: TelegramConfig {
+                    enabled: true,
+                    chat_id: "123456".into(),
+                    content: ContentMode::Image,
+                },
             },
             llm: LlmConfig {
                 enabled: true,
@@ -300,6 +330,7 @@ mod tests {
                     batch_size: 0,
                     ..EmailConfig::default()
                 },
+                ..ChannelsConfig::default()
             },
             llm: LlmConfig {
                 base_url: "  http://localhost:11434///".into(),

@@ -30,6 +30,26 @@
     });
   }
 
+  function badges(row: CaptureRow): { sink: string; ok: boolean }[] {
+    if (!row.delivery_summary) return [];
+    return row.delivery_summary.split(",").map((entry) => {
+      const [sink, status] = entry.split(":");
+      return { sink, ok: status === "sent" };
+    });
+  }
+
+  function patchDeliveries(ids: number[], sink: string, status: string) {
+    const patch = (row: CaptureRow): CaptureRow => {
+      if (!ids.includes(row.id)) return row;
+      const rest = (row.delivery_summary ?? "")
+        .split(",")
+        .filter((e) => e && !e.startsWith(`${sink}:`));
+      return { ...row, delivery_summary: [...rest, `${sink}:${status}`].join(",") };
+    };
+    captures = captures.map(patch);
+    if (searchResults) searchResults = searchResults.map(patch);
+  }
+
   /** Group consecutive captures (already newest-first) by calendar day. */
   function grouped(rows: CaptureRow[]): { day: string; rows: CaptureRow[] }[] {
     const groups: { day: string; rows: CaptureRow[] }[] = [];
@@ -101,9 +121,11 @@
         );
       } else if (core.type === "delivery_failed") {
         deliveryError = `${core.data.sink}: ${core.data.message}`;
+        patchDeliveries(core.data.capture_ids, core.data.sink, "failed");
       } else if (core.type === "delivery_succeeded") {
         deliveryError = null;
         lastDelivery = `Sent ${core.data.count} capture${core.data.count > 1 ? "s" : ""} via ${core.data.sink}`;
+        patchDeliveries(core.data.capture_ids, core.data.sink, "sent");
       }
     }).then((fn) => (unlisten = fn));
     return () => unlisten?.();
@@ -193,7 +215,14 @@
             {/if}
             <figcaption>
               <span>{timeOf(row)}</span>
-              <span class="dim">{row.width}×{row.height}</span>
+              <span class="badges">
+                {#each badges(row) as badge (badge.sink)}
+                  <span class="badge" class:ok={badge.ok} title={`${badge.sink}: ${badge.ok ? "sent" : "failed"}`}>
+                    {badge.sink === "email" ? "✉" : "✈"}{badge.ok ? "" : "!"}
+                  </span>
+                {/each}
+                <span class="dim">{row.width}×{row.height}</span>
+              </span>
             </figcaption>
           </figure>
         {/each}
@@ -320,6 +349,18 @@
   }
   .dim {
     color: #7c8598;
+  }
+  .badges {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .badge {
+    color: #e0a83c;
+    font-size: 12px;
+  }
+  .badge.ok {
+    color: #45d483;
   }
   .load-more {
     display: block;

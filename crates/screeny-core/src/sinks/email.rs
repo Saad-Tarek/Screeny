@@ -258,6 +258,7 @@ mod tests {
                 height: 10,
                 status: "captured".into(),
                 description: None,
+                delivery_summary: None,
             },
             analysis,
         }

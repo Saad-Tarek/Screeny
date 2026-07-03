@@ -13,7 +13,7 @@ pub mod store;
 
 pub use config::{
     CaptureConfig, ChannelsConfig, Config, ContentMode, EmailConfig, ImageFormat, LlmBackendKind,
-    LlmConfig, SmtpSecurity,
+    LlmConfig, SmtpSecurity, TelegramConfig,
 };
 pub use error::{CoreError, Result};
 pub use llm::{
@@ -21,6 +21,11 @@ pub use llm::{
     ollama::OllamaBackend, ollama::PullProgress, Analysis, LlmBackend,
 };
 pub use pipeline::{CoreEvent, Engine, EngineOptions, Frame, RunState};
-pub use secrets::{KeyringStore, MemoryStore, SecretStore, LLM_API_KEY, SMTP_PASSWORD};
-pub use sinks::{email::EmailSink, DeliveryItem, Sink, SinkKind};
+pub use secrets::{
+    KeyringStore, MemoryStore, SecretStore, LLM_API_KEY, SMTP_PASSWORD, TELEGRAM_BOT_TOKEN,
+};
+pub use sinks::{
+    email::EmailSink, telegram::DiscoveredChat, telegram::TelegramSink, DeliveryItem, Sink,
+    SinkKind,
+};
 pub use store::{CaptureRow, Store};

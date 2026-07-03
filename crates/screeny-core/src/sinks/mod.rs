@@ -2,6 +2,7 @@
 //! M2 ships email; Telegram and WhatsApp arrive in later milestones.
 
 pub mod email;
+pub mod telegram;
 
 use async_trait::async_trait;
 use serde::Serialize;
@@ -21,12 +22,14 @@ pub struct DeliveryItem {
 #[serde(rename_all = "lowercase")]
 pub enum SinkKind {
     Email,
+    Telegram,
 }
 
 impl SinkKind {
     pub fn as_str(self) -> &'static str {
         match self {
             SinkKind::Email => "email",
+            SinkKind::Telegram => "telegram",
         }
     }
 }

@@ -20,6 +20,14 @@
   let modelsError = $state<string | null>(null);
   let loadingModels = $state(false);
 
+  let tgTokenInput = $state("");
+  let tgTokenSaved = $state(false);
+  let tgTestState = $state<"idle" | "sending" | "ok" | "failed">("idle");
+  let tgTestError = $state<string | null>(null);
+  let tgChats = $state<import("$lib/api").DiscoveredChat[]>([]);
+  let tgDiscoverError = $state<string | null>(null);
+  let tgDiscovering = $state(false);
+
   onMount(async () => {
     try {
       const loaded = await api.getConfig();
@@ -28,6 +36,7 @@
       passwordSaved = await api.emailPasswordSet();
       autostart = await api.getAutostart();
       apiKeySaved = await api.llmApiKeySet();
+      tgTokenSaved = await api.telegramTokenSet();
       if (loaded.llm.enabled) refreshModels();
     } catch (e) {
       error = String(e);
@@ -103,6 +112,48 @@
     } catch (e) {
       error = String(e);
       autostart = !autostart;
+    }
+  }
+
+  async function saveTgTokenIfTyped() {
+    if (tgTokenInput.trim()) {
+      await api.setTelegramToken(tgTokenInput);
+      tgTokenInput = "";
+      tgTokenSaved = true;
+    }
+  }
+
+  async function tgDiscover() {
+    tgDiscovering = true;
+    tgDiscoverError = null;
+    try {
+      await saveTgTokenIfTyped();
+      tgChats = await api.telegramDiscoverChats();
+      if (tgChats.length === 0) {
+        tgDiscoverError =
+          "No chats found. Open Telegram, send your bot any message, then try again.";
+      } else if (config && !config.channels.telegram.chat_id) {
+        config.channels.telegram.chat_id = String(tgChats[0].id);
+      }
+    } catch (e) {
+      tgDiscoverError = String(e);
+    } finally {
+      tgDiscovering = false;
+    }
+  }
+
+  async function sendTgTest() {
+    const pending = pendingConfig();
+    if (!pending) return;
+    tgTestState = "sending";
+    tgTestError = null;
+    try {
+      await saveTgTokenIfTyped();
+      await api.testTelegram(pending);
+      tgTestState = "ok";
+    } catch (e) {
+      tgTestState = "failed";
+      tgTestError = String(e);
     }
   }
 
@@ -378,6 +429,82 @@
     </section>
 
     <section>
+      <h2>Telegram delivery</h2>
+
+      <label class="field row">
+        <input type="checkbox" bind:checked={config.channels.telegram.enabled} />
+        <span>Send each capture to a Telegram chat</span>
+      </label>
+
+      {#if config.channels.telegram.enabled}
+        <label class="field">
+          <span>Bot token {tgTokenSaved ? "(saved in system keychain)" : ""}</span>
+          <input
+            type="password"
+            placeholder={tgTokenSaved ? "••••••••  — type to replace" : "123456:ABC-DEF…"}
+            bind:value={tgTokenInput}
+          />
+          <small>
+            Create a bot in Telegram by messaging <strong>@BotFather</strong> →
+            /newbot. Paste the token here, then send your new bot any message.
+          </small>
+        </label>
+
+        <div class="grid-2">
+          <label class="field">
+            <span>Chat ID</span>
+            <input type="text" placeholder="e.g. 123456789" bind:value={config.channels.telegram.chat_id} />
+          </label>
+          <div class="field">
+            <span>&nbsp;</span>
+            <button type="button" class="secondary" onclick={tgDiscover} disabled={tgDiscovering}>
+              {tgDiscovering ? "Looking…" : "Detect chat ID"}
+            </button>
+          </div>
+        </div>
+        {#if tgChats.length > 0}
+          <div class="chip-row">
+            {#each tgChats as chat (chat.id)}
+              <button
+                type="button"
+                class="chip"
+                class:selected={config.channels.telegram.chat_id === String(chat.id)}
+                onclick={() => {
+                  if (config) config.channels.telegram.chat_id = String(chat.id);
+                }}
+              >
+                {chat.label} ({chat.id})
+              </button>
+            {/each}
+          </div>
+        {/if}
+        {#if tgDiscoverError}
+          <span class="test-failed">{tgDiscoverError}</span>
+        {/if}
+
+        <label class="field">
+          <span>Message content</span>
+          <select bind:value={config.channels.telegram.content}>
+            <option value="image">Screenshots only</option>
+            <option value="analysis">AI analysis text only</option>
+            <option value="both">Screenshot with AI caption</option>
+          </select>
+        </label>
+
+        <div class="test-row">
+          <button type="button" class="secondary" onclick={sendTgTest} disabled={tgTestState === "sending"}>
+            {tgTestState === "sending" ? "Sending…" : "Send test message"}
+          </button>
+          {#if tgTestState === "ok"}
+            <span class="saved">Test sent ✓ — check Telegram</span>
+          {:else if tgTestState === "failed"}
+            <span class="test-failed">{tgTestError}</span>
+          {/if}
+        </div>
+      {/if}
+    </section>
+
+    <section>
       <h2>System</h2>
       <label class="field row">
         <input type="checkbox" bind:checked={autostart} onchange={toggleAutostart} />
@@ -465,6 +592,25 @@
   .test-failed {
     color: #f2b8bf;
     font-size: 13px;
+  }
+  .chip-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .chip {
+    background: #10131a;
+    border: 1px solid #2c3342;
+    color: #aab2c3;
+    border-radius: 999px;
+    padding: 5px 12px;
+    font-size: 13px;
+    cursor: pointer;
+  }
+  .chip.selected {
+    border-color: #2f6feb;
+    color: #ffffff;
+    background: #1c2947;
   }
   input[type="text"],
   input[type="email"],

@@ -5,8 +5,9 @@ use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_autostart::ManagerExt;
 
 use screeny_core::{
-    backend_from_config, detect_local_backends, CaptureRow, Config, DetectResult, EmailSink,
-    Engine, LlmBackendKind, OllamaBackend, RunState, Sink, LLM_API_KEY, SMTP_PASSWORD,
+    backend_from_config, detect_local_backends, CaptureRow, Config, DetectResult, DiscoveredChat,
+    EmailSink, Engine, LlmBackendKind, OllamaBackend, RunState, Sink, TelegramSink, LLM_API_KEY,
+    SMTP_PASSWORD, TELEGRAM_BOT_TOKEN,
 };
 
 type EngineState<'a> = State<'a, Arc<Engine>>;
@@ -99,6 +100,49 @@ pub fn set_autostart(app: AppHandle, enabled: bool) -> Result<(), String> {
     } else {
         launcher.disable().map_err(|e| e.to_string())
     }
+}
+
+#[tauri::command]
+pub async fn set_telegram_token(engine: EngineState<'_>, token: String) -> Result<(), String> {
+    let secrets = engine.secrets().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let trimmed = token.trim();
+        if trimmed.is_empty() {
+            secrets.delete(TELEGRAM_BOT_TOKEN)
+        } else {
+            secrets.set(TELEGRAM_BOT_TOKEN, trimmed)
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn telegram_token_set(engine: EngineState<'_>) -> Result<bool, String> {
+    let secrets = engine.secrets().clone();
+    tauri::async_runtime::spawn_blocking(move || secrets.is_set(TELEGRAM_BOT_TOKEN))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Send a test message with the pending (unsaved) Telegram settings.
+#[tauri::command]
+pub async fn test_telegram(engine: EngineState<'_>, config: Config) -> Result<(), String> {
+    let sink = TelegramSink::new(
+        config.sanitized().channels.telegram,
+        engine.secrets().clone(),
+    );
+    sink.test().await.map_err(|e| e.to_string())
+}
+
+/// List chats the bot has recently seen (user must message the bot first).
+#[tauri::command]
+pub async fn telegram_discover_chats(
+    engine: EngineState<'_>,
+) -> Result<Vec<DiscoveredChat>, String> {
+    let sink = TelegramSink::new(engine.config().channels.telegram, engine.secrets().clone());
+    sink.discover_chats().await.map_err(|e| e.to_string())
 }
 
 /// Probe localhost for Ollama / LM Studio and report installed models.

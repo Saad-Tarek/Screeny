@@ -20,6 +20,7 @@ use crate::error::{CoreError, Result};
 use crate::llm::{self, Analysis, LlmBackend};
 use crate::secrets::SecretStore;
 use crate::sinks::email::EmailSink;
+use crate::sinks::telegram::TelegramSink;
 use crate::sinks::{DeliveryItem, Sink, SinkKind};
 use crate::store::{image_path_for, CaptureRow, NewCapture, Store};
 
@@ -64,6 +65,12 @@ pub fn default_sink_factory(secrets: Arc<dyn SecretStore>) -> SinkFactory {
                 secrets.clone(),
             )));
         }
+        if config.channels.telegram.enabled {
+            sinks.push(Arc::new(TelegramSink::new(
+                config.channels.telegram.clone(),
+                secrets.clone(),
+            )));
+        }
         sinks
     })
 }
@@ -89,10 +96,12 @@ pub enum CoreEvent {
     DeliverySucceeded {
         sink: SinkKind,
         count: usize,
+        capture_ids: Vec<i64>,
     },
     DeliveryFailed {
         sink: SinkKind,
         message: String,
+        capture_ids: Vec<i64>,
     },
     AnalysisCompleted {
         capture_id: i64,
@@ -509,6 +518,7 @@ async fn deliver_with_retry(
                 let _ = events.send(CoreEvent::DeliverySucceeded {
                     sink: sink.kind(),
                     count: batch.len(),
+                    capture_ids: ids,
                 });
                 return;
             }
@@ -529,6 +539,7 @@ async fn deliver_with_retry(
     let _ = events.send(CoreEvent::DeliveryFailed {
         sink: sink.kind(),
         message: last_error,
+        capture_ids: ids,
     });
 }
 
@@ -595,6 +606,7 @@ mod tests {
                     enabled: true,
                     ..EmailConfig::default()
                 },
+                ..ChannelsConfig::default()
             },
             ..Config::default()
         }
