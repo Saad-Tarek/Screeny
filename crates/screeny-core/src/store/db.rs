@@ -33,6 +33,9 @@ pub struct CaptureRow {
     pub width: u32,
     pub height: u32,
     pub status: String,
+    /// AI description when analyzed (populated by list/search queries).
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 impl Store {
@@ -74,6 +77,45 @@ impl Store {
             width: new.width,
             height: new.height,
             status: "captured".into(),
+            description: None,
+        })
+    }
+
+    /// Store one capture's analysis and index it for full-text search.
+    pub fn insert_analysis(&self, capture_id: i64, analysis: &crate::llm::Analysis) -> Result<()> {
+        let mut conn = self.conn.lock().expect("store mutex poisoned");
+        let tx = conn.transaction()?;
+        tx.execute(
+            "INSERT OR REPLACE INTO analyses
+                 (capture_id, model, ocr_text, description, latency_ms, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                capture_id,
+                analysis.model,
+                analysis.ocr_text,
+                analysis.description,
+                analysis.latency_ms as i64,
+                Utc::now().to_rfc3339(),
+            ],
+        )?;
+        tx.execute(
+            "INSERT INTO captures_fts (rowid, ocr_text, description) VALUES (?1, ?2, ?3)",
+            params![capture_id, analysis.ocr_text, analysis.description],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn row_from(r: &rusqlite::Row<'_>) -> rusqlite::Result<CaptureRow> {
+        Ok(CaptureRow {
+            id: r.get(0)?,
+            taken_at: r.get(1)?,
+            path: r.get(2)?,
+            monitor: r.get(3)?,
+            width: r.get(4)?,
+            height: r.get(5)?,
+            status: r.get(6)?,
+            description: r.get(7)?,
         })
     }
 
@@ -82,24 +124,44 @@ impl Store {
     pub fn list_captures(&self, limit: u32, before_id: Option<i64>) -> Result<Vec<CaptureRow>> {
         let conn = self.conn.lock().expect("store mutex poisoned");
         let mut stmt = conn.prepare(
-            "SELECT id, taken_at, path, monitor, width, height, status
-             FROM captures
-             WHERE (?1 IS NULL OR id < ?1)
-             ORDER BY id DESC
+            "SELECT c.id, c.taken_at, c.path, c.monitor, c.width, c.height, c.status,
+                    a.description
+             FROM captures c
+             LEFT JOIN analyses a ON a.capture_id = c.id
+             WHERE (?1 IS NULL OR c.id < ?1)
+             ORDER BY c.id DESC
              LIMIT ?2",
         )?;
         let rows = stmt
-            .query_map(params![before_id, limit], |r| {
-                Ok(CaptureRow {
-                    id: r.get(0)?,
-                    taken_at: r.get(1)?,
-                    path: r.get(2)?,
-                    monitor: r.get(3)?,
-                    width: r.get(4)?,
-                    height: r.get(5)?,
-                    status: r.get(6)?,
-                })
-            })?
+            .query_map(params![before_id, limit], Self::row_from)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Full-text search over OCR text + descriptions. Each term is quoted so
+    /// user input can't break the FTS5 query syntax.
+    pub fn search_captures(&self, query: &str, limit: u32) -> Result<Vec<CaptureRow>> {
+        let fts_query = query
+            .split_whitespace()
+            .map(|term| format!("\"{}\"", term.replace('"', "\"\"")))
+            .collect::<Vec<_>>()
+            .join(" ");
+        if fts_query.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT c.id, c.taken_at, c.path, c.monitor, c.width, c.height, c.status,
+                    a.description
+             FROM captures_fts f
+             JOIN captures c ON c.id = f.rowid
+             LEFT JOIN analyses a ON a.capture_id = c.id
+             WHERE captures_fts MATCH ?1
+             ORDER BY c.id DESC
+             LIMIT ?2",
+        )?;
+        let rows = stmt
+            .query_map(params![fts_query, limit], Self::row_from)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows)
     }
@@ -179,6 +241,42 @@ mod tests {
         assert_eq!(next.len(), 2);
         assert_eq!(next[1].path, "shot_0.jpg");
         assert_eq!(store.capture_count().unwrap(), 5);
+    }
+
+    #[test]
+    fn analysis_round_trip_and_fts_search() {
+        let store = Store::open_in_memory().unwrap();
+        let row = store
+            .insert_capture(&capture_at(Utc::now(), "a.jpg"))
+            .unwrap();
+        store
+            .insert_analysis(
+                row.id,
+                &crate::llm::Analysis {
+                    model: "moondream".into(),
+                    ocr_text: "cargo build --release".into(),
+                    description: "A terminal running a Rust build.".into(),
+                    latency_ms: 900,
+                },
+            )
+            .unwrap();
+
+        // list_captures surfaces the description
+        let listed = store.list_captures(10, None).unwrap();
+        assert_eq!(
+            listed[0].description.as_deref(),
+            Some("A terminal running a Rust build.")
+        );
+
+        // search hits OCR text and description; misses unrelated terms
+        assert_eq!(store.search_captures("cargo release", 10).unwrap().len(), 1);
+        assert_eq!(store.search_captures("terminal", 10).unwrap().len(), 1);
+        assert!(store.search_captures("spreadsheet", 10).unwrap().is_empty());
+        // hostile input must not break FTS syntax
+        assert!(store
+            .search_captures("\"unbalanced OR (", 10)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

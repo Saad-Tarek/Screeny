@@ -51,6 +51,7 @@ pub fn run() {
                     capture_fn: Arc::new(capture::capture_primary),
                     secrets: Arc::new(KeyringStore),
                     sink_factory: None,
+                    analyzer_factory: None,
                 })
             });
 
@@ -78,6 +79,12 @@ pub fn run() {
             commands::test_email,
             commands::get_autostart,
             commands::set_autostart,
+            commands::detect_backends,
+            commands::list_models,
+            commands::pull_model,
+            commands::search_captures,
+            commands::set_llm_api_key,
+            commands::llm_api_key_set,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -1,10 +1,13 @@
 use std::sync::Arc;
 
 use serde::Serialize;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_autostart::ManagerExt;
 
-use screeny_core::{CaptureRow, Config, EmailSink, Engine, RunState, Sink, SMTP_PASSWORD};
+use screeny_core::{
+    backend_from_config, detect_local_backends, CaptureRow, Config, DetectResult, EmailSink,
+    Engine, LlmBackendKind, OllamaBackend, RunState, Sink, LLM_API_KEY, SMTP_PASSWORD,
+};
 
 type EngineState<'a> = State<'a, Arc<Engine>>;
 
@@ -96,6 +99,96 @@ pub fn set_autostart(app: AppHandle, enabled: bool) -> Result<(), String> {
     } else {
         launcher.disable().map_err(|e| e.to_string())
     }
+}
+
+/// Probe localhost for Ollama / LM Studio and report installed models.
+#[tauri::command]
+pub async fn detect_backends() -> DetectResult {
+    detect_local_backends(None, None).await
+}
+
+/// List models on the backend described by the (possibly unsaved) config.
+#[tauri::command]
+pub async fn list_models(engine: EngineState<'_>, config: Config) -> Result<Vec<String>, String> {
+    let llm = config.sanitized().llm;
+    let backend = backend_from_config(&llm, engine.secrets().clone());
+    backend.list_models().await.map_err(|e| e.to_string())
+}
+
+#[derive(Clone, Serialize)]
+struct PullProgressEvent {
+    model: String,
+    status: String,
+    total: Option<u64>,
+    completed: Option<u64>,
+}
+
+/// Download a model through Ollama, emitting `pull-progress` events so the
+/// onboarding wizard can render a progress bar.
+#[tauri::command]
+pub async fn pull_model(
+    app: AppHandle,
+    engine: EngineState<'_>,
+    model: String,
+) -> Result<(), String> {
+    let llm = engine.config().llm;
+    let base_url = if llm.backend == LlmBackendKind::Ollama {
+        llm.base_url
+    } else {
+        LlmBackendKind::Ollama.default_base_url().to_string()
+    };
+    let backend = OllamaBackend::new(base_url);
+    let model_name = model.clone();
+    backend
+        .pull_model(&model, move |progress| {
+            let _ = app.emit(
+                "pull-progress",
+                PullProgressEvent {
+                    model: model_name.clone(),
+                    status: progress.status,
+                    total: progress.total,
+                    completed: progress.completed,
+                },
+            );
+        })
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn search_captures(
+    engine: EngineState,
+    query: String,
+    limit: Option<u32>,
+) -> Result<Vec<CaptureRow>, String> {
+    engine
+        .store()
+        .search_captures(&query, limit.unwrap_or(100).min(500))
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn set_llm_api_key(engine: EngineState<'_>, key: String) -> Result<(), String> {
+    let secrets = engine.secrets().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let trimmed = key.trim();
+        if trimmed.is_empty() {
+            secrets.delete(LLM_API_KEY)
+        } else {
+            secrets.set(LLM_API_KEY, trimmed)
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn llm_api_key_set(engine: EngineState<'_>) -> Result<bool, String> {
+    let secrets = engine.secrets().clone();
+    tauri::async_runtime::spawn_blocking(move || secrets.is_set(LLM_API_KEY))
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

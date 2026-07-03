@@ -17,10 +17,14 @@ use tracing::{info, warn};
 use crate::capture;
 use crate::config::Config;
 use crate::error::{CoreError, Result};
+use crate::llm::{self, Analysis, LlmBackend};
 use crate::secrets::SecretStore;
 use crate::sinks::email::EmailSink;
-use crate::sinks::{Sink, SinkKind};
+use crate::sinks::{DeliveryItem, Sink, SinkKind};
 use crate::store::{image_path_for, CaptureRow, NewCapture, Store};
+
+/// Longest edge sent to vision models; screenshots are downscaled to this.
+const LLM_MAX_EDGE: u32 = 1280;
 
 /// A raw captured frame, before encoding.
 pub struct Frame {
@@ -34,6 +38,21 @@ pub type CaptureFn = Arc<dyn Fn() -> Result<Frame> + Send + Sync>;
 
 /// Builds the currently enabled sinks from config. Injected for testability.
 pub type SinkFactory = Arc<dyn Fn(&Config) -> Vec<Arc<dyn Sink>> + Send + Sync>;
+
+/// Builds the analysis backend from config (None = analysis disabled).
+/// Injected for testability.
+pub type AnalyzerFactory = Arc<dyn Fn(&Config) -> Option<Arc<dyn LlmBackend>> + Send + Sync>;
+
+/// Production analyzer factory: honors `llm.enabled` and requires a model.
+pub fn default_analyzer_factory(secrets: Arc<dyn SecretStore>) -> AnalyzerFactory {
+    Arc::new(move |config: &Config| {
+        if config.llm.enabled && !config.llm.model.is_empty() {
+            Some(llm::backend_from_config(&config.llm, secrets.clone()))
+        } else {
+            None
+        }
+    })
+}
 
 /// Production factory: one sink per enabled channel.
 pub fn default_sink_factory(secrets: Arc<dyn SecretStore>) -> SinkFactory {
@@ -60,11 +79,32 @@ pub enum RunState {
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum CoreEvent {
     CaptureTaken(CaptureRow),
-    CaptureFailed { message: String },
-    StateChanged { state: RunState },
+    CaptureFailed {
+        message: String,
+    },
+    StateChanged {
+        state: RunState,
+    },
     ConfigChanged(Config),
-    DeliverySucceeded { sink: SinkKind, count: usize },
-    DeliveryFailed { sink: SinkKind, message: String },
+    DeliverySucceeded {
+        sink: SinkKind,
+        count: usize,
+    },
+    DeliveryFailed {
+        sink: SinkKind,
+        message: String,
+    },
+    AnalysisCompleted {
+        capture_id: i64,
+        description: String,
+    },
+    AnalysisFailed {
+        capture_id: i64,
+        message: String,
+    },
+    AnalysisSkipped {
+        capture_id: i64,
+    },
 }
 
 pub struct EngineOptions {
@@ -76,6 +116,8 @@ pub struct EngineOptions {
     pub secrets: Arc<dyn SecretStore>,
     /// Defaults to `default_sink_factory(secrets)` when None.
     pub sink_factory: Option<SinkFactory>,
+    /// Defaults to `default_analyzer_factory(secrets)` when None.
+    pub analyzer_factory: Option<AnalyzerFactory>,
 }
 
 pub struct Engine {
@@ -100,10 +142,13 @@ impl Engine {
             capture_fn,
             secrets,
             sink_factory,
+            analyzer_factory,
         } = options;
 
         let config = config.sanitized();
         let sink_factory = sink_factory.unwrap_or_else(|| default_sink_factory(secrets.clone()));
+        let analyzer_factory =
+            analyzer_factory.unwrap_or_else(|| default_analyzer_factory(secrets.clone()));
         let initial_state = if config.capture.start_on_launch {
             RunState::Running
         } else {
@@ -113,7 +158,10 @@ impl Engine {
         let (config_tx, config_rx) = watch::channel(config);
         let (events, _) = broadcast::channel(64);
         let (capture_now_tx, capture_now_rx) = mpsc::channel(4);
-        let (delivery_tx, delivery_rx) = mpsc::channel::<CaptureRow>(32);
+        // Bounded: local inference is slower than the capture interval; when
+        // this backs up we skip analysis rather than stall (plan's policy).
+        let (analysis_tx, analysis_rx) = mpsc::channel::<CaptureRow>(8);
+        let (delivery_tx, delivery_rx) = mpsc::channel::<DeliveryItem>(32);
 
         let engine = Arc::new(Engine {
             state_tx,
@@ -133,7 +181,16 @@ impl Engine {
             data_dir,
             capture_fn,
             events.clone(),
+            analysis_tx,
+            delivery_tx.clone(),
+        ));
+        tokio::spawn(analysis_loop(
+            analysis_rx,
             delivery_tx,
+            config_rx.clone(),
+            analyzer_factory,
+            store.clone(),
+            events.clone(),
         ));
         tokio::spawn(delivery_loop(
             delivery_rx,
@@ -212,7 +269,8 @@ async fn run_loop(
     data_dir: PathBuf,
     capture_fn: CaptureFn,
     events: broadcast::Sender<CoreEvent>,
-    delivery_tx: mpsc::Sender<CaptureRow>,
+    analysis_tx: mpsc::Sender<CaptureRow>,
+    delivery_tx: mpsc::Sender<DeliveryItem>,
 ) {
     let mut interval_secs = config_rx.borrow().capture.interval_seconds;
     let mut ticker = tokio::time::interval(Duration::from_secs(interval_secs));
@@ -225,7 +283,7 @@ async fn run_loop(
         tokio::select! {
             _ = ticker.tick() => {
                 if *state_rx.borrow() == RunState::Running {
-                    do_capture(&store, &data_dir, &capture_fn, &config_rx, &events, &delivery_tx).await;
+                    do_capture(&store, &data_dir, &capture_fn, &config_rx, &events, &analysis_tx, &delivery_tx).await;
                 }
             }
             changed = config_rx.changed() => {
@@ -244,19 +302,21 @@ async fn run_loop(
                 if request.is_none() {
                     break; // engine dropped
                 }
-                do_capture(&store, &data_dir, &capture_fn, &config_rx, &events, &delivery_tx).await;
+                do_capture(&store, &data_dir, &capture_fn, &config_rx, &events, &analysis_tx, &delivery_tx).await;
             }
         }
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn do_capture(
     store: &Arc<Store>,
     data_dir: &Path,
     capture_fn: &CaptureFn,
     config_rx: &watch::Receiver<Config>,
     events: &broadcast::Sender<CoreEvent>,
-    delivery_tx: &mpsc::Sender<CaptureRow>,
+    analysis_tx: &mpsc::Sender<CaptureRow>,
+    delivery_tx: &mpsc::Sender<DeliveryItem>,
 ) {
     let capture_config = config_rx.borrow().capture.clone();
     let capture_fn = capture_fn.clone();
@@ -292,9 +352,17 @@ async fn do_capture(
     match result {
         Ok(row) => {
             let _ = events.send(CoreEvent::CaptureTaken(row.clone()));
-            // try_send: a saturated delivery queue must never stall capture.
-            if let Err(e) = delivery_tx.try_send(row) {
-                warn!(error = %e, "delivery queue full; capture stays local-only");
+            // try_send: a saturated pipeline must never stall capture. If the
+            // analysis queue is full (slow local model), skip analysis and
+            // hand the capture straight to delivery.
+            if let Err(mpsc::error::TrySendError::Full(row)) = analysis_tx.try_send(row) {
+                let _ = events.send(CoreEvent::AnalysisSkipped { capture_id: row.id });
+                if let Err(e) = delivery_tx.try_send(DeliveryItem {
+                    capture: row,
+                    analysis: None,
+                }) {
+                    warn!(error = %e, "delivery queue full; capture stays local-only");
+                }
             }
         }
         Err(e) => {
@@ -327,22 +395,91 @@ fn persist(
     })
 }
 
+/// Analysis worker: single consumer so at most one inference runs at a time.
+/// Failures and disabled analysis both fall through to delivery untouched.
+async fn analysis_loop(
+    mut analysis_rx: mpsc::Receiver<CaptureRow>,
+    delivery_tx: mpsc::Sender<DeliveryItem>,
+    config_rx: watch::Receiver<Config>,
+    analyzer_factory: AnalyzerFactory,
+    store: Arc<Store>,
+    events: broadcast::Sender<CoreEvent>,
+) {
+    while let Some(row) = analysis_rx.recv().await {
+        let config = config_rx.borrow().clone();
+        let analysis = match analyzer_factory(&config) {
+            None => None,
+            Some(backend) => match analyze_one(backend, &row, &config).await {
+                Ok(analysis) => {
+                    if let Err(e) = store.insert_analysis(row.id, &analysis) {
+                        warn!(error = %e, "failed to store analysis");
+                    }
+                    let _ = events.send(CoreEvent::AnalysisCompleted {
+                        capture_id: row.id,
+                        description: analysis.description.clone(),
+                    });
+                    Some(analysis)
+                }
+                Err(e) => {
+                    warn!(capture_id = row.id, error = %e, "analysis failed");
+                    let _ = events.send(CoreEvent::AnalysisFailed {
+                        capture_id: row.id,
+                        message: e.to_string(),
+                    });
+                    None
+                }
+            },
+        };
+        if delivery_tx
+            .send(DeliveryItem {
+                capture: row,
+                analysis,
+            })
+            .await
+            .is_err()
+        {
+            break; // delivery loop gone; engine shutting down
+        }
+    }
+}
+
+async fn analyze_one(
+    backend: Arc<dyn LlmBackend>,
+    row: &CaptureRow,
+    config: &Config,
+) -> Result<Analysis> {
+    let bytes = tokio::fs::read(&row.path)
+        .await
+        .map_err(|e| CoreError::Llm(format!("read {}: {e}", row.path)))?;
+    let small =
+        tokio::task::spawn_blocking(move || capture::downscale_for_llm(&bytes, LLM_MAX_EDGE))
+            .await
+            .map_err(|e| CoreError::Llm(format!("downscale task: {e}")))??;
+    let prompt = config
+        .llm
+        .prompt_override
+        .clone()
+        .filter(|p| !p.trim().is_empty())
+        .unwrap_or_else(|| llm::prompts::DEFAULT_PROMPT.to_string());
+    backend.analyze(&small, &config.llm.model, &prompt).await
+}
+
 /// Fan-out worker: accumulates captures per sink and delivers when each
 /// sink's batch size is reached. A failing sink never blocks the others.
 async fn delivery_loop(
-    mut delivery_rx: mpsc::Receiver<CaptureRow>,
+    mut delivery_rx: mpsc::Receiver<DeliveryItem>,
     config_rx: watch::Receiver<Config>,
     sink_factory: SinkFactory,
     store: Arc<Store>,
     events: broadcast::Sender<CoreEvent>,
 ) {
-    let mut queues: HashMap<SinkKind, Vec<CaptureRow>> = HashMap::new();
+    let mut queues: HashMap<SinkKind, Vec<DeliveryItem>> = HashMap::new();
 
-    while let Some(row) = delivery_rx.recv().await {
+    while let Some(item) = delivery_rx.recv().await {
         let sinks = sink_factory(&config_rx.borrow().clone());
         for sink in sinks {
             let queue = queues.entry(sink.kind()).or_default();
-            queue.push(row.clone());
+            queue.push(item.clone());
             if queue.len() >= sink.batch_size() {
                 let batch = std::mem::take(queue);
                 deliver_with_retry(sink, batch, &store, &events).await;
@@ -356,11 +493,11 @@ const DELIVERY_RETRY_DELAY: Duration = Duration::from_secs(2);
 
 async fn deliver_with_retry(
     sink: Arc<dyn Sink>,
-    batch: Vec<CaptureRow>,
+    batch: Vec<DeliveryItem>,
     store: &Arc<Store>,
     events: &broadcast::Sender<CoreEvent>,
 ) {
-    let ids: Vec<i64> = batch.iter().map(|r| r.id).collect();
+    let ids: Vec<i64> = batch.iter().map(|item| item.capture.id).collect();
     let mut last_error = String::new();
 
     for attempt in 1..=DELIVERY_ATTEMPTS {
@@ -496,7 +633,7 @@ mod tests {
         fn batch_size(&self) -> usize {
             self.batch_size
         }
-        async fn deliver(&self, batch: &[CaptureRow]) -> Result<()> {
+        async fn deliver(&self, batch: &[DeliveryItem]) -> Result<()> {
             let call = self.calls.fetch_add(1, Ordering::SeqCst);
             if call < self.fail_first {
                 return Err(CoreError::Delivery {
@@ -507,11 +644,37 @@ mod tests {
             self.batches
                 .lock()
                 .unwrap()
-                .push(batch.iter().map(|r| r.id).collect());
+                .push(batch.iter().map(|item| item.capture.id).collect());
             Ok(())
         }
         async fn test(&self) -> Result<()> {
             Ok(())
+        }
+    }
+
+    /// Fake vision model: returns a fixed analysis or errors.
+    struct FakeBackend {
+        fail: bool,
+    }
+
+    #[async_trait]
+    impl LlmBackend for FakeBackend {
+        fn id(&self) -> &'static str {
+            "fake"
+        }
+        async fn list_models(&self) -> Result<Vec<String>> {
+            Ok(vec!["fake-vl".into()])
+        }
+        async fn analyze(&self, _image: &[u8], model: &str, _prompt: &str) -> Result<Analysis> {
+            if self.fail {
+                return Err(CoreError::Llm("model exploded".into()));
+            }
+            Ok(Analysis {
+                model: model.to_string(),
+                ocr_text: "unique_ocr_token".into(),
+                description: "A fake analyzed screen.".into(),
+                latency_ms: 1,
+            })
         }
     }
 
@@ -521,7 +684,12 @@ mod tests {
         sink: Arc<FakeSink>,
     }
 
-    async fn start_with_sink(config: Config, dir: &Path, sink: Arc<FakeSink>) -> TestEngine {
+    async fn start_full(
+        config: Config,
+        dir: &Path,
+        sink: Arc<FakeSink>,
+        analyzer: Option<Arc<dyn LlmBackend>>,
+    ) -> TestEngine {
         let store = Arc::new(Store::open_in_memory().unwrap());
         let sink_for_factory = sink.clone();
         let engine = Engine::start(EngineOptions {
@@ -534,6 +702,7 @@ mod tests {
             sink_factory: Some(Arc::new(move |_| {
                 vec![sink_for_factory.clone() as Arc<dyn Sink>]
             })),
+            analyzer_factory: Some(Arc::new(move |_| analyzer.clone())),
         });
         let events = engine.subscribe();
         TestEngine {
@@ -541,6 +710,10 @@ mod tests {
             events,
             sink,
         }
+    }
+
+    async fn start_with_sink(config: Config, dir: &Path, sink: Arc<FakeSink>) -> TestEngine {
+        start_full(config, dir, sink, None).await
     }
 
     async fn wait_for(
@@ -642,6 +815,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn analysis_is_stored_searchable_and_reaches_sink() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut t = start_full(
+            test_config(3600, true),
+            dir.path(),
+            FakeSink::new(1, 0),
+            Some(Arc::new(FakeBackend { fail: false })),
+        )
+        .await;
+
+        t.engine.capture_now().await.unwrap();
+        wait_for(&mut t.events, |e| {
+            matches!(e, CoreEvent::AnalysisCompleted { .. })
+        })
+        .await;
+        wait_for(&mut t.events, |e| {
+            matches!(e, CoreEvent::DeliverySucceeded { .. })
+        })
+        .await;
+
+        // FTS finds the capture by OCR token
+        let hits = t
+            .engine
+            .store()
+            .search_captures("unique_ocr_token", 10)
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(
+            hits[0].description.as_deref(),
+            Some("A fake analyzed screen.")
+        );
+    }
+
+    #[tokio::test]
+    async fn analysis_failure_still_delivers_capture() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut t = start_full(
+            test_config(3600, true),
+            dir.path(),
+            FakeSink::new(1, 0),
+            Some(Arc::new(FakeBackend { fail: true })),
+        )
+        .await;
+
+        t.engine.capture_now().await.unwrap();
+        wait_for(&mut t.events, |e| {
+            matches!(e, CoreEvent::AnalysisFailed { .. })
+        })
+        .await;
+        wait_for(&mut t.events, |e| {
+            matches!(e, CoreEvent::DeliverySucceeded { .. })
+        })
+        .await;
+        assert_eq!(t.sink.delivered().len(), 1);
+    }
+
+    #[tokio::test]
     async fn paused_engine_does_not_capture_on_schedule() {
         let dir = tempfile::tempdir().unwrap();
         let t = start_with_sink(test_config(5, false), dir.path(), FakeSink::new(1, 0)).await;
@@ -692,6 +922,7 @@ mod tests {
             capture_fn: failing,
             secrets: Arc::new(MemoryStore::default()),
             sink_factory: None,
+            analyzer_factory: None,
         });
         let mut rx = engine.subscribe();
 

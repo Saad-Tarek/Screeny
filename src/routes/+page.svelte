@@ -10,6 +10,9 @@
   let lastError = $state<string | null>(null);
   let deliveryError = $state<string | null>(null);
   let lastDelivery = $state<string | null>(null);
+  let searchQuery = $state("");
+  let searchResults = $state<CaptureRow[] | null>(null);
+  let searchTimer: ReturnType<typeof setTimeout> | undefined;
   let loadingMore = $state(false);
   let reachedEnd = $state(false);
   let capturing = $state(false);
@@ -54,6 +57,22 @@
     }
   }
 
+  function onSearchInput() {
+    clearTimeout(searchTimer);
+    const query = searchQuery.trim();
+    if (!query) {
+      searchResults = null;
+      return;
+    }
+    searchTimer = setTimeout(async () => {
+      try {
+        searchResults = await api.searchCaptures(query);
+      } catch (e) {
+        lastError = String(e);
+      }
+    }, 250);
+  }
+
   async function captureNow() {
     capturing = true;
     lastError = null;
@@ -76,6 +95,10 @@
         lastError = null;
       } else if (core.type === "capture_failed") {
         lastError = core.data.message;
+      } else if (core.type === "analysis_completed") {
+        captures = captures.map((c) =>
+          c.id === core.data.capture_id ? { ...c, description: core.data.description } : c
+        );
       } else if (core.type === "delivery_failed") {
         deliveryError = `${core.data.sink}: ${core.data.message}`;
       } else if (core.type === "delivery_succeeded") {
@@ -89,6 +112,13 @@
 
 <header class="page-head">
   <h1>Dashboard</h1>
+  <input
+    class="search"
+    type="search"
+    placeholder="Search on-screen text and descriptions…"
+    bind:value={searchQuery}
+    oninput={onSearchInput}
+  />
   <button class="primary" onclick={captureNow} disabled={capturing}>
     {capturing ? "Capturing…" : "Capture now"}
   </button>
@@ -107,7 +137,38 @@
   <div class="notice">{lastDelivery}</div>
 {/if}
 
-{#if captures.length === 0 && !loadingMore}
+{#if searchResults !== null}
+  <h2 class="day">
+    {searchResults.length} result{searchResults.length === 1 ? "" : "s"} for “{searchQuery.trim()}”
+  </h2>
+  {#if searchResults.length === 0}
+    <div class="empty">
+      <p>Nothing found.</p>
+      <p class="hint">
+        Search covers AI-extracted text — captures taken before enabling AI
+        analysis aren't indexed.
+      </p>
+    </div>
+  {:else}
+    <div class="grid">
+      {#each searchResults as row (row.id)}
+        <figure class="card" title={row.path}>
+          <img
+            src={convertFileSrc(row.path)}
+            alt={`Screenshot at ${timeOf(row)}`}
+            loading="lazy"
+          />
+          {#if row.description}
+            <p class="snippet">{row.description}</p>
+          {/if}
+          <figcaption>
+            <span>{dayOf(row)} {timeOf(row)}</span>
+          </figcaption>
+        </figure>
+      {/each}
+    </div>
+  {/if}
+{:else if captures.length === 0 && !loadingMore}
   <div class="empty">
     <p>No captures yet.</p>
     <p class="hint">
@@ -127,6 +188,9 @@
               alt={`Screenshot at ${timeOf(row)}`}
               loading="lazy"
             />
+            {#if row.description}
+              <p class="snippet">{row.description}</p>
+            {/if}
             <figcaption>
               <span>{timeOf(row)}</span>
               <span class="dim">{row.width}×{row.height}</span>
@@ -148,7 +212,33 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
+    gap: 12px;
     margin-bottom: 16px;
+  }
+  .search {
+    flex: 1;
+    max-width: 420px;
+    background: #10131a;
+    border: 1px solid #2c3342;
+    color: #e6e8ee;
+    border-radius: 8px;
+    padding: 8px 12px;
+    font-size: 14px;
+  }
+  .search::placeholder {
+    color: #6b7385;
+  }
+  .snippet {
+    margin: 0;
+    padding: 0 10px 9px;
+    font-size: 12px;
+    line-height: 1.45;
+    color: #97a0b4;
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
   }
   h1 {
     font-size: 20px;

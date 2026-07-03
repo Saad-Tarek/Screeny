@@ -5,14 +5,22 @@
 pub mod capture;
 pub mod config;
 pub mod error;
+pub mod llm;
 pub mod pipeline;
 pub mod secrets;
 pub mod sinks;
 pub mod store;
 
-pub use config::{CaptureConfig, ChannelsConfig, Config, EmailConfig, ImageFormat, SmtpSecurity};
+pub use config::{
+    CaptureConfig, ChannelsConfig, Config, ContentMode, EmailConfig, ImageFormat, LlmBackendKind,
+    LlmConfig, SmtpSecurity,
+};
 pub use error::{CoreError, Result};
+pub use llm::{
+    backend_from_config, detect::detect_local_backends, detect::DetectResult,
+    ollama::OllamaBackend, ollama::PullProgress, Analysis, LlmBackend,
+};
 pub use pipeline::{CoreEvent, Engine, EngineOptions, Frame, RunState};
-pub use secrets::{KeyringStore, MemoryStore, SecretStore, SMTP_PASSWORD};
-pub use sinks::{email::EmailSink, Sink, SinkKind};
+pub use secrets::{KeyringStore, MemoryStore, SecretStore, LLM_API_KEY, SMTP_PASSWORD};
+pub use sinks::{email::EmailSink, DeliveryItem, Sink, SinkKind};
 pub use store::{CaptureRow, Store};

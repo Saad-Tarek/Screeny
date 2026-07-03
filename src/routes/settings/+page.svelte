@@ -14,6 +14,12 @@
   let testState = $state<"idle" | "sending" | "ok" | "failed">("idle");
   let testError = $state<string | null>(null);
 
+  let apiKeyInput = $state("");
+  let apiKeySaved = $state(false);
+  let models = $state<string[]>([]);
+  let modelsError = $state<string | null>(null);
+  let loadingModels = $state(false);
+
   onMount(async () => {
     try {
       const loaded = await api.getConfig();
@@ -21,10 +27,42 @@
       config = loaded;
       passwordSaved = await api.emailPasswordSet();
       autostart = await api.getAutostart();
+      apiKeySaved = await api.llmApiKeySet();
+      if (loaded.llm.enabled) refreshModels();
     } catch (e) {
       error = String(e);
     }
   });
+
+  function backendChanged() {
+    if (!config) return;
+    config.llm.base_url = "";
+    models = [];
+    modelsError = null;
+  }
+
+  async function refreshModels() {
+    const pending = pendingConfig();
+    if (!pending) return;
+    loadingModels = true;
+    modelsError = null;
+    try {
+      if (apiKeyInput.trim()) {
+        await api.setLlmApiKey(apiKeyInput);
+        apiKeyInput = "";
+        apiKeySaved = true;
+      }
+      models = await api.listModels(pending);
+      if (models.length === 0) {
+        modelsError = "Connected, but no models are installed on this backend.";
+      }
+    } catch (e) {
+      models = [];
+      modelsError = String(e);
+    } finally {
+      loadingModels = false;
+    }
+  }
 
   function pendingConfig(): Config | null {
     if (!config) return null;
@@ -161,6 +199,92 @@
     </section>
 
     <section>
+      <h2>AI analysis</h2>
+
+      <label class="field row">
+        <input type="checkbox" bind:checked={config.llm.enabled} />
+        <span>Analyze captures with a vision model (OCR + description)</span>
+      </label>
+
+      {#if config.llm.enabled}
+        <label class="field">
+          <span>Backend</span>
+          <select bind:value={config.llm.backend} onchange={backendChanged}>
+            <option value="ollama">Ollama (local, private — recommended)</option>
+            <option value="lmstudio">LM Studio (local, private)</option>
+            <option value="custom">OpenAI-compatible API (cloud)</option>
+          </select>
+          {#if config.llm.backend === "custom"}
+            <small>
+              Cloud APIs see your screenshots. For privacy, prefer a local backend.
+            </small>
+          {/if}
+        </label>
+
+        <label class="field">
+          <span>Server URL</span>
+          <input
+            type="text"
+            placeholder={config.llm.backend === "ollama"
+              ? "http://localhost:11434"
+              : config.llm.backend === "lmstudio"
+                ? "http://localhost:1234"
+                : "https://api.openai.com"}
+            bind:value={config.llm.base_url}
+          />
+        </label>
+
+        {#if config.llm.backend === "custom"}
+          <label class="field">
+            <span>API key {apiKeySaved ? "(saved in system keychain)" : ""}</span>
+            <input
+              type="password"
+              placeholder={apiKeySaved ? "••••••••  — type to replace" : "sk-…"}
+              bind:value={apiKeyInput}
+            />
+          </label>
+        {/if}
+
+        <div class="test-row">
+          <button
+            type="button"
+            class="secondary"
+            onclick={refreshModels}
+            disabled={loadingModels}
+          >
+            {loadingModels ? "Connecting…" : "Connect & list models"}
+          </button>
+          {#if models.length > 0}
+            <span class="saved">Connected ✓ ({models.length} models)</span>
+          {/if}
+        </div>
+        {#if modelsError}
+          <span class="test-failed">{modelsError}</span>
+        {/if}
+
+        <label class="field">
+          <span>Vision model</span>
+          {#if models.length > 0}
+            <select bind:value={config.llm.model}>
+              {#if config.llm.model && !models.includes(config.llm.model)}
+                <option value={config.llm.model}>{config.llm.model} (not installed)</option>
+              {/if}
+              {#each models as model (model)}
+                <option value={model}>{model}</option>
+              {/each}
+            </select>
+          {:else}
+            <input type="text" placeholder="e.g. moondream" bind:value={config.llm.model} />
+          {/if}
+          <small>
+            Recommended: moondream (small/fast) · qwen2.5vl:3b (balanced) ·
+            qwen2.5vl:7b (best OCR).
+          </small>
+        </label>
+      {/if}
+    </section>
+
+    <section>
       <h2>Email delivery</h2>
 
       <label class="field row">
@@ -216,6 +340,20 @@
             <input type="email" placeholder="you@gmail.com" bind:value={config.channels.email.to} />
           </label>
         </div>
+
+        <label class="field">
+          <span>Email content</span>
+          <select bind:value={config.channels.email.content}>
+            <option value="image">Screenshots only</option>
+            <option value="analysis">AI analysis text only (smallest emails)</option>
+            <option value="both">Screenshots + AI analysis</option>
+          </select>
+          {#if config.channels.email.content !== "image" && !config.llm.enabled}
+            <small class="test-failed">
+              AI analysis is disabled above — emails will say "no analysis available".
+            </small>
+          {/if}
+        </label>
 
         <label class="field">
           <span>Screenshots per email: {config.channels.email.batch_size}</span>

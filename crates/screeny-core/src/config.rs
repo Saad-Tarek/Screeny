@@ -51,6 +51,59 @@ impl Default for CaptureConfig {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+pub enum LlmBackendKind {
+    Ollama,
+    Lmstudio,
+    /// Any OpenAI-compatible endpoint (OpenAI, OpenRouter, custom).
+    Custom,
+}
+
+impl LlmBackendKind {
+    pub fn default_base_url(self) -> &'static str {
+        match self {
+            LlmBackendKind::Ollama => "http://localhost:11434",
+            LlmBackendKind::Lmstudio => "http://localhost:1234",
+            LlmBackendKind::Custom => "https://api.openai.com",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LlmConfig {
+    /// Analyze each capture (OCR + description) with a vision model.
+    pub enabled: bool,
+    pub backend: LlmBackendKind,
+    /// Base URL without the API path (e.g. http://localhost:11434).
+    pub base_url: String,
+    pub model: String,
+    /// Replaces the built-in analysis prompt when set.
+    pub prompt_override: Option<String>,
+}
+
+impl Default for LlmConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            backend: LlmBackendKind::Ollama,
+            base_url: LlmBackendKind::Ollama.default_base_url().into(),
+            model: String::new(),
+            prompt_override: None,
+        }
+    }
+}
+
+/// What an outgoing delivery contains.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ContentMode {
+    Image,
+    Analysis,
+    Both,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum SmtpSecurity {
     /// Implicit TLS (SMTPS), typically port 465.
     Ssl,
@@ -72,6 +125,8 @@ pub struct EmailConfig {
     /// Screenshots bundled per email. Raise to stay under provider send
     /// limits (e.g. Gmail's ~500 emails/day).
     pub batch_size: u32,
+    /// Send the screenshot, the AI analysis text, or both.
+    pub content: ContentMode,
 }
 
 impl Default for EmailConfig {
@@ -85,6 +140,7 @@ impl Default for EmailConfig {
             from: String::new(),
             to: String::new(),
             batch_size: 1,
+            content: ContentMode::Image,
         }
     }
 }
@@ -101,6 +157,9 @@ pub struct Config {
     pub version: u32,
     pub capture: CaptureConfig,
     pub channels: ChannelsConfig,
+    pub llm: LlmConfig,
+    /// First-run wizard finished (or explicitly skipped).
+    pub onboarding_complete: bool,
 }
 
 impl Default for Config {
@@ -109,6 +168,8 @@ impl Default for Config {
             version: CONFIG_VERSION,
             capture: CaptureConfig::default(),
             channels: ChannelsConfig::default(),
+            llm: LlmConfig::default(),
+            onboarding_complete: false,
         }
     }
 }
@@ -129,10 +190,24 @@ impl Config {
             to: self.channels.email.to.trim().to_string(),
             ..self.channels.email.clone()
         };
+        let llm = LlmConfig {
+            base_url: {
+                let trimmed = self.llm.base_url.trim().trim_end_matches('/');
+                if trimmed.is_empty() {
+                    self.llm.backend.default_base_url().to_string()
+                } else {
+                    trimmed.to_string()
+                }
+            },
+            model: self.llm.model.trim().to_string(),
+            ..self.llm.clone()
+        };
         Config {
             version: CONFIG_VERSION,
             capture,
             channels: ChannelsConfig { email },
+            llm,
+            onboarding_complete: self.onboarding_complete,
         }
     }
 
@@ -187,8 +262,17 @@ mod tests {
                     from: "a@example.com".into(),
                     to: "b@example.com".into(),
                     batch_size: 30,
+                    content: ContentMode::Both,
                 },
             },
+            llm: LlmConfig {
+                enabled: true,
+                backend: LlmBackendKind::Ollama,
+                base_url: "http://localhost:11434".into(),
+                model: "moondream".into(),
+                prompt_override: None,
+            },
+            onboarding_complete: true,
         };
         config.save(&path).unwrap();
         let loaded = Config::load_or_default(&path).unwrap();
@@ -217,11 +301,17 @@ mod tests {
                     ..EmailConfig::default()
                 },
             },
+            llm: LlmConfig {
+                base_url: "  http://localhost:11434///".into(),
+                ..LlmConfig::default()
+            },
+            onboarding_complete: false,
         };
         let clean = config.sanitized();
         assert_eq!(clean.capture.interval_seconds, 5);
         assert_eq!(clean.capture.jpeg_quality, 100);
         assert_eq!(clean.channels.email.batch_size, 1);
+        assert_eq!(clean.llm.base_url, "http://localhost:11434");
     }
 
     #[test]

@@ -25,6 +25,9 @@ pub enum CoreError {
 
     #[error("delivery failed via {sink}: {message}")]
     Delivery { sink: String, message: String },
+
+    #[error("llm error: {0}")]
+    Llm(String),
 }
 
 pub type Result<T> = std::result::Result<T, CoreError>;

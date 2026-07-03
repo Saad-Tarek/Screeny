@@ -7,6 +7,7 @@ use std::sync::Mutex;
 use crate::error::{CoreError, Result};
 
 pub const SMTP_PASSWORD: &str = "smtp_password";
+pub const LLM_API_KEY: &str = "llm_api_key";
 
 const KEYRING_SERVICE: &str = "screeny";
 

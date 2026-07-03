@@ -7,7 +7,15 @@ use async_trait::async_trait;
 use serde::Serialize;
 
 use crate::error::Result;
+use crate::llm::Analysis;
 use crate::store::CaptureRow;
+
+/// A capture on its way out, with analysis when the LLM produced one.
+#[derive(Debug, Clone)]
+pub struct DeliveryItem {
+    pub capture: CaptureRow,
+    pub analysis: Option<Analysis>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -33,8 +41,8 @@ pub trait Sink: Send + Sync {
     }
 
     /// Deliver a batch of captures. Implementations read image bytes from
-    /// each row's `path`.
-    async fn deliver(&self, batch: &[CaptureRow]) -> Result<()>;
+    /// each item's capture `path`.
+    async fn deliver(&self, batch: &[DeliveryItem]) -> Result<()>;
 
     /// Cheap connectivity check used by the "Send test" button.
     async fn test(&self) -> Result<()>;

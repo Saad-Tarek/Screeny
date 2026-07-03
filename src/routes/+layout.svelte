@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+  import { goto } from "$app/navigation";
   import { page } from "$app/stores";
   import { api, type CoreEvent, type RunState } from "$lib/api";
 
@@ -8,6 +9,8 @@
 
   let runState = $state<RunState>("running");
   let totalCaptures = $state(0);
+
+  const onboarding = $derived($page.url.pathname.startsWith("/onboarding"));
 
   async function refreshStatus() {
     try {
@@ -25,6 +28,12 @@
 
   onMount(() => {
     refreshStatus();
+    api
+      .getConfig()
+      .then((config) => {
+        if (!config.onboarding_complete) goto("/onboarding");
+      })
+      .catch(() => {});
     let unlisten: UnlistenFn | undefined;
     listen<CoreEvent>("core-event", (event) => {
       const core = event.payload;
@@ -36,7 +45,7 @@
 </script>
 
 <div class="shell">
-  <aside class="sidebar">
+  <aside class="sidebar" class:hidden={onboarding}>
     <div class="brand">
       <span class="brand-dot" class:paused={runState === "paused"}></span>
       Screeny
@@ -71,6 +80,9 @@
   .shell {
     display: flex;
     height: 100vh;
+  }
+  .sidebar.hidden {
+    display: none;
   }
   .sidebar {
     width: 190px;

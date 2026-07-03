@@ -54,6 +54,25 @@ pub fn encode(image: &RgbaImage, format: ImageFormat, jpeg_quality: u8) -> Resul
     Ok(out)
 }
 
+/// Shrink an encoded image so its longest edge is at most `max_edge` before
+/// sending it to a vision model — smaller payloads, much faster inference.
+/// Returns re-encoded JPEG bytes (or the original bytes if already small).
+pub fn downscale_for_llm(bytes: &[u8], max_edge: u32) -> Result<Vec<u8>> {
+    let img = image::load_from_memory(bytes).map_err(|e| CoreError::Encode(e.to_string()))?;
+    let (w, h) = (img.width(), img.height());
+    if w.max(h) <= max_edge {
+        return Ok(bytes.to_vec());
+    }
+    let resized = img.resize(max_edge, max_edge, image::imageops::FilterType::Triangle);
+    let mut out = Vec::new();
+    let encoder = JpegEncoder::new_with_quality(&mut out, 80);
+    resized
+        .to_rgb8()
+        .write_with_encoder(encoder)
+        .map_err(|e| CoreError::Encode(e.to_string()))?;
+    Ok(out)
+}
+
 /// Detect the all-black frames macOS produces when Screen Recording permission
 /// is missing. Samples a sparse grid instead of every pixel.
 fn looks_blank(image: &RgbaImage) -> bool {
@@ -97,6 +116,19 @@ mod tests {
         // JPEG magic bytes / PNG signature
         assert_eq!(&jpeg[..2], &[0xFF, 0xD8]);
         assert_eq!(&png[..4], &[0x89, b'P', b'N', b'G']);
+    }
+
+    #[test]
+    fn downscale_shrinks_large_images_and_passes_small_ones() {
+        let large = RgbaImage::from_pixel(2560, 1440, image::Rgba([120, 120, 120, 255]));
+        let bytes = encode(&large, ImageFormat::Jpeg, 80).unwrap();
+        let shrunk = downscale_for_llm(&bytes, 1280).unwrap();
+        let reloaded = image::load_from_memory(&shrunk).unwrap();
+        assert_eq!(reloaded.width().max(reloaded.height()), 1280);
+
+        let small = RgbaImage::from_pixel(640, 480, image::Rgba([9, 9, 9, 255]));
+        let small_bytes = encode(&small, ImageFormat::Jpeg, 80).unwrap();
+        assert_eq!(downscale_for_llm(&small_bytes, 1280).unwrap(), small_bytes);
     }
 
     #[test]

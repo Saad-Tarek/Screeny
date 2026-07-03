@@ -11,11 +11,10 @@ use lettre::message::{Attachment, MultiPart, SinglePart};
 use lettre::transport::smtp::authentication::Credentials;
 use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
 
-use crate::config::{EmailConfig, SmtpSecurity};
+use crate::config::{ContentMode, EmailConfig, SmtpSecurity};
 use crate::error::{CoreError, Result};
 use crate::secrets::{SecretStore, SMTP_PASSWORD};
-use crate::sinks::{Sink, SinkKind};
-use crate::store::CaptureRow;
+use crate::sinks::{DeliveryItem, Sink, SinkKind};
 
 pub struct EmailSink {
     config: EmailConfig,
@@ -76,32 +75,74 @@ impl EmailSink {
         Ok(())
     }
 
-    fn build_message(&self, batch: &[CaptureRow], images: Vec<Vec<u8>>) -> Result<Message> {
-        let stamp = Local::now().format("%Y-%m-%d %H:%M:%S");
+    fn body_text(&self, batch: &[DeliveryItem], stamp: &str) -> String {
+        let mut body = format!(
+            "Automated screen archive from Screeny.\nCaptured: {stamp}\nScreenshots in this batch: {}\n",
+            batch.len()
+        );
+        if self.config.content != ContentMode::Image {
+            for item in batch {
+                let time = item
+                    .capture
+                    .taken_at
+                    .get(11..19)
+                    .unwrap_or(&item.capture.taken_at);
+                body.push_str(&format!(
+                    "\n===== {} ({}) =====\n",
+                    time, item.capture.monitor
+                ));
+                match &item.analysis {
+                    Some(analysis) => {
+                        if !analysis.description.is_empty() {
+                            body.push_str(&format!("Summary: {}\n", analysis.description));
+                        }
+                        if !analysis.ocr_text.is_empty() {
+                            let mut ocr = analysis.ocr_text.as_str();
+                            if ocr.len() > 4000 {
+                                let mut cut = 4000;
+                                while !ocr.is_char_boundary(cut) {
+                                    cut -= 1;
+                                }
+                                ocr = &ocr[..cut];
+                            }
+                            body.push_str(&format!("On-screen text:\n{ocr}\n"));
+                        }
+                    }
+                    None => body.push_str("(no AI analysis available for this capture)\n"),
+                }
+            }
+        }
+        body
+    }
+
+    fn build_message(&self, batch: &[DeliveryItem], images: Vec<Vec<u8>>) -> Result<Message> {
+        let stamp = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
         let suffix = if batch.len() > 1 {
             format!(" ({} shots)", batch.len())
         } else {
             String::new()
         };
 
-        let mut multipart = MultiPart::mixed().singlepart(SinglePart::plain(format!(
-            "Automated screen archive from Screeny.\nCaptured: {stamp}\nScreenshots attached: {}\n",
-            batch.len()
-        )));
+        let mut multipart =
+            MultiPart::mixed().singlepart(SinglePart::plain(self.body_text(batch, &stamp)));
 
-        for (row, bytes) in batch.iter().zip(images) {
-            let filename = Path::new(&row.path)
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| format!("capture_{}.jpg", row.id));
-            let mime = if filename.ends_with(".png") {
-                "image/png"
-            } else {
-                "image/jpeg"
-            };
-            let content_type =
-                ContentType::parse(mime).map_err(|e| Self::err(format!("mime: {e}")))?;
-            multipart = multipart.singlepart(Attachment::new(filename).body(bytes, content_type));
+        if self.config.content != ContentMode::Analysis {
+            for (item, bytes) in batch.iter().zip(images) {
+                let row = &item.capture;
+                let filename = Path::new(&row.path)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| format!("capture_{}.jpg", row.id));
+                let mime = if filename.ends_with(".png") {
+                    "image/png"
+                } else {
+                    "image/jpeg"
+                };
+                let content_type =
+                    ContentType::parse(mime).map_err(|e| Self::err(format!("mime: {e}")))?;
+                multipart =
+                    multipart.singlepart(Attachment::new(filename).body(bytes, content_type));
+            }
         }
 
         Message::builder()
@@ -132,14 +173,17 @@ impl Sink for EmailSink {
         self.config.batch_size.max(1) as usize
     }
 
-    async fn deliver(&self, batch: &[CaptureRow]) -> Result<()> {
+    async fn deliver(&self, batch: &[DeliveryItem]) -> Result<()> {
         self.validate()?;
         let mut images = Vec::with_capacity(batch.len());
-        for row in batch {
-            let bytes = tokio::fs::read(&row.path)
-                .await
-                .map_err(|e| Self::err(format!("read {}: {e}", row.path)))?;
-            images.push(bytes);
+        if self.config.content != ContentMode::Analysis {
+            for item in batch {
+                let path = &item.capture.path;
+                let bytes = tokio::fs::read(path)
+                    .await
+                    .map_err(|e| Self::err(format!("read {path}: {e}")))?;
+                images.push(bytes);
+            }
         }
         let message = self.build_message(batch, images)?;
         let transport = self.transport(self.password().await?)?;
@@ -203,36 +247,71 @@ mod tests {
         assert!(sink(valid_config()).validate().is_ok());
     }
 
+    fn item(id: i64, path: &str, analysis: Option<crate::llm::Analysis>) -> DeliveryItem {
+        DeliveryItem {
+            capture: crate::store::CaptureRow {
+                id,
+                taken_at: format!("2026-07-02T10:00:0{id}Z"),
+                path: path.into(),
+                monitor: "M".into(),
+                width: 10,
+                height: 10,
+                status: "captured".into(),
+                description: None,
+            },
+            analysis,
+        }
+    }
+
+    fn analysis() -> crate::llm::Analysis {
+        crate::llm::Analysis {
+            model: "moondream".into(),
+            ocr_text: "SECRET_OCR_LINE".into(),
+            description: "A code editor with tests.".into(),
+            latency_ms: 500,
+        }
+    }
+
     #[test]
     fn builds_multipart_message_with_attachments() {
         let sink = sink(valid_config());
-        let rows = vec![
-            CaptureRow {
-                id: 1,
-                taken_at: "2026-07-02T10:00:00Z".into(),
-                path: "shot_1.jpg".into(),
-                monitor: "M".into(),
-                width: 10,
-                height: 10,
-                status: "captured".into(),
-            },
-            CaptureRow {
-                id: 2,
-                taken_at: "2026-07-02T10:00:20Z".into(),
-                path: "shot_2.png".into(),
-                monitor: "M".into(),
-                width: 10,
-                height: 10,
-                status: "captured".into(),
-            },
-        ];
+        let items = vec![item(1, "shot_1.jpg", None), item(2, "shot_2.png", None)];
         let message = sink
-            .build_message(&rows, vec![vec![1, 2, 3], vec![4, 5, 6]])
+            .build_message(&items, vec![vec![1, 2, 3], vec![4, 5, 6]])
             .unwrap();
         let raw = String::from_utf8_lossy(&message.formatted()).into_owned();
         assert!(raw.contains("(2 shots)"));
         assert!(raw.contains("shot_1.jpg"));
         assert!(raw.contains("image/png"));
+        // image mode: no analysis text
+        assert!(!raw.contains("Summary:"));
+    }
+
+    #[test]
+    fn analysis_mode_includes_text_and_skips_attachments() {
+        let sink = sink(EmailConfig {
+            content: ContentMode::Analysis,
+            ..valid_config()
+        });
+        let items = vec![item(1, "shot_1.jpg", Some(analysis()))];
+        let message = sink.build_message(&items, vec![]).unwrap();
+        let raw = String::from_utf8_lossy(&message.formatted()).into_owned();
+        assert!(raw.contains("A code editor with tests."));
+        assert!(raw.contains("SECRET_OCR_LINE"));
+        assert!(!raw.contains("Content-Disposition: attachment"));
+    }
+
+    #[test]
+    fn both_mode_includes_text_and_attachments() {
+        let sink = sink(EmailConfig {
+            content: ContentMode::Both,
+            ..valid_config()
+        });
+        let items = vec![item(1, "shot_1.jpg", Some(analysis()))];
+        let message = sink.build_message(&items, vec![vec![7, 7]]).unwrap();
+        let raw = String::from_utf8_lossy(&message.formatted()).into_owned();
+        assert!(raw.contains("Summary: A code editor with tests."));
+        assert!(raw.contains("shot_1.jpg"));
     }
 
     #[tokio::test]
