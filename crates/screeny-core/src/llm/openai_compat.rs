@@ -13,7 +13,8 @@ use crate::error::{CoreError, Result};
 use crate::llm::{prompts, Analysis, LlmBackend};
 use crate::secrets::{SecretStore, LLM_API_KEY};
 
-const ANALYZE_TIMEOUT: Duration = Duration::from_secs(120);
+// Big local models on CPU can take minutes per image.
+const ANALYZE_TIMEOUT: Duration = Duration::from_secs(300);
 const LIST_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub struct OpenAiCompatBackend {
@@ -45,7 +46,21 @@ struct Choice {
 
 #[derive(Deserialize)]
 struct ChoiceMessage {
-    content: String,
+    #[serde(default)]
+    content: Option<String>,
+    /// Reasoning models (served by LM Studio and others) put their chain of
+    /// thought here; if they exhaust max_tokens, `content` stays empty.
+    #[serde(default)]
+    reasoning_content: Option<String>,
+}
+
+impl ChoiceMessage {
+    fn best_text(&self) -> &str {
+        match &self.content {
+            Some(content) if !content.trim().is_empty() => content,
+            _ => self.reasoning_content.as_deref().unwrap_or(""),
+        }
+    }
 }
 
 impl OpenAiCompatBackend {
@@ -115,7 +130,9 @@ impl LlmBackend for OpenAiCompatBackend {
         let body = json!({
             "model": model,
             "temperature": 0,
-            "max_tokens": 800,
+            // Generous budget: reasoning models spend tokens thinking before
+            // they emit the JSON answer.
+            "max_tokens": 2000,
             "messages": [{
                 "role": "user",
                 "content": [
@@ -141,9 +158,15 @@ impl LlmBackend for OpenAiCompatBackend {
         let content = completion
             .choices
             .first()
-            .map(|c| c.message.content.as_str())
+            .map(|c| c.message.best_text())
             .unwrap_or_default();
         let (ocr_text, description) = prompts::parse_response(content);
+        if ocr_text.is_empty() && description.is_empty() {
+            return Err(Self::err(
+                "model returned an empty answer (it may have spent all tokens reasoning, \
+                 or it is not a vision model)",
+            ));
+        }
         Ok(Analysis {
             model: model.to_string(),
             ocr_text,
@@ -183,6 +206,49 @@ mod tests {
         let analysis = backend.analyze(&[9, 9], "gpt-test", "p").await.unwrap();
         assert_eq!(analysis.ocr_text, "TOTAL 42");
         assert_eq!(analysis.description, "A spreadsheet.");
+    }
+
+    #[tokio::test]
+    async fn falls_back_to_reasoning_content_when_content_empty() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "content": "",
+                        "reasoning_content": "Looking at the image... {\"ocr\": \"btn OK\", \"description\": \"A dialog.\"}"
+                    }
+                }]
+            })))
+            .mount(&server)
+            .await;
+
+        let backend = OpenAiCompatBackend::new(server.uri(), None);
+        let analysis = backend.analyze(&[1], "gemma-vl", "p").await.unwrap();
+        assert_eq!(analysis.ocr_text, "btn OK");
+        assert_eq!(analysis.description, "A dialog.");
+    }
+
+    #[tokio::test]
+    async fn empty_answer_is_an_error_not_blank_analysis() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "choices": [{ "message": { "role": "assistant", "content": "" } }]
+            })))
+            .mount(&server)
+            .await;
+
+        let backend = OpenAiCompatBackend::new(server.uri(), None);
+        let err = backend
+            .analyze(&[1], "m", "p")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("empty answer"), "got: {err}");
     }
 
     #[tokio::test]

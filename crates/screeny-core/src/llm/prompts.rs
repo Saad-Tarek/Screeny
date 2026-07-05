@@ -8,11 +8,32 @@ Respond with ONLY a JSON object, no other text:\n\
 
 /// Extracted (ocr, description) from raw model output.
 pub fn parse_response(raw: &str) -> (String, String) {
-    if let Some((ocr, description)) = try_parse_json(raw) {
+    let cleaned = strip_think_blocks(raw);
+    if let Some((ocr, description)) = try_parse_json(&cleaned) {
         return (ocr, description);
     }
     // Fallback: model ignored the format; keep everything as description.
-    (String::new(), raw.trim().to_string())
+    (String::new(), cleaned.trim().to_string())
+}
+
+/// Reasoning models often prefix their answer with `<think>…</think>`.
+/// Remove those blocks so only the final answer is parsed.
+fn strip_think_blocks(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut rest = raw;
+    while let Some(start) = rest.find("<think>") {
+        out.push_str(&rest[..start]);
+        match rest[start..].find("</think>") {
+            Some(end) => rest = &rest[start + end + "</think>".len()..],
+            None => {
+                // Unterminated block: everything after is reasoning; drop it.
+                rest = "";
+                break;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 fn try_parse_json(raw: &str) -> Option<(String, String)> {
@@ -75,6 +96,19 @@ mod tests {
         let (ocr, desc) = parse_response(raw);
         assert_eq!(ocr, "abc");
         assert_eq!(desc, "A browser.");
+    }
+
+    #[test]
+    fn think_blocks_are_stripped_before_parsing() {
+        let raw = "<think>The user wants JSON. Let me look at the image…</think>\n{\"ocr\": \"ls -la\", \"description\": \"A terminal.\"}";
+        let (ocr, desc) = parse_response(raw);
+        assert_eq!(ocr, "ls -la");
+        assert_eq!(desc, "A terminal.");
+
+        // Unterminated think block (model ran out of tokens mid-reasoning)
+        let (ocr2, desc2) = parse_response("<think>hmm this looks like");
+        assert_eq!(ocr2, "");
+        assert_eq!(desc2, "");
     }
 
     #[test]
