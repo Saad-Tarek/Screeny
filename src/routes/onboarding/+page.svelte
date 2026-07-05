@@ -29,6 +29,7 @@
   let detect = $state<DetectResult | null>(null);
   let detecting = $state(false);
   let aiChoice = $state<"local" | "skip">("local");
+  let chosenBackend = $state<"ollama" | "lmstudio">("ollama");
   let chosenModel = $state("");
   let pull = $state<{ model: string; percent: number | null; status: string } | null>(null);
   let pullDone = $state(false);
@@ -90,11 +91,16 @@
     detecting = true;
     try {
       detect = await api.detectBackends();
-      const visionInstalled = detect.ollama?.find((m) =>
-        RECOMMENDED_MODELS.some((r) => m.startsWith(r.tag.split(":")[0]))
-      );
-      if (visionInstalled) chosenModel = visionInstalled;
-      else if (detect.ollama) chosenModel = RECOMMENDED_MODELS[0].tag;
+      if (detect.ollama) {
+        chosenBackend = "ollama";
+        const visionInstalled = detect.ollama.find((m) =>
+          RECOMMENDED_MODELS.some((r) => m.startsWith(r.tag.split(":")[0]))
+        );
+        chosenModel = visionInstalled ?? RECOMMENDED_MODELS[0].tag;
+      } else if (detect.lmstudio) {
+        chosenBackend = "lmstudio";
+        chosenModel = detect.lmstudio[0] ?? "";
+      }
     } catch (e) {
       error = String(e);
     } finally {
@@ -126,7 +132,9 @@
     finishing = true;
     error = null;
     try {
-      const useAi = aiChoice === "local" && !!detect?.ollama && !!chosenModel;
+      const backendDetected =
+        chosenBackend === "ollama" ? !!detect?.ollama : !!detect?.lmstudio;
+      const useAi = aiChoice === "local" && backendDetected && !!chosenModel;
       const updated: Config = {
         ...config,
         onboarding_complete: true,
@@ -134,8 +142,11 @@
           ? {
               ...config.llm,
               enabled: true,
-              backend: "ollama",
-              base_url: "http://localhost:11434",
+              backend: chosenBackend,
+              base_url:
+                chosenBackend === "ollama"
+                  ? "http://localhost:11434"
+                  : "http://localhost:1234",
               model: chosenModel,
             }
           : config.llm,
@@ -258,11 +269,21 @@
           <p class="ok">Model already installed ✓</p>
         {/if}
       {:else if detect.lmstudio}
-        <p class="ok">LM Studio detected ✓</p>
-        <p class="hint">
-          You can pick an LM Studio model later in Settings → AI analysis. For
-          the smoothest setup we recommend Ollama.
-        </p>
+        <p class="ok">LM Studio detected ✓ ({detect.lmstudio.length} models loaded)</p>
+        <label class="field">
+          <span>Model to use</span>
+          <select bind:value={chosenModel}>
+            {#each detect.lmstudio as m (m)}
+              <option value={m}>{m}</option>
+            {/each}
+          </select>
+          <small>
+            ⚠ Screenshots need a <strong>vision</strong> model (e.g. Qwen2.5-VL,
+            LLaVA, Gemma 3 vision). Text or code models cannot read images — if
+            none of these are vision models, download one in LM Studio first,
+            or skip and set this up later.
+          </small>
+        </label>
       {:else}
         <p>No local AI backend found.</p>
         <p class="hint">
@@ -280,7 +301,10 @@
           aiChoice = "local";
           next();
         }}
-        disabled={!detect?.ollama || !chosenModel || (!modelInstalled && !pullDone)}
+        disabled={!chosenModel ||
+          (chosenBackend === "ollama"
+            ? !detect?.ollama || (!modelInstalled && !pullDone)
+            : !detect?.lmstudio)}
       >
         Enable AI analysis
       </button>

@@ -20,6 +20,9 @@
   let modelsError = $state<string | null>(null);
   let loadingModels = $state(false);
 
+  let llmTestState = $state<"idle" | "running" | "ok" | "failed">("idle");
+  let llmTestResult = $state<string | null>(null);
+
   let tgTokenInput = $state("");
   let tgTokenSaved = $state(false);
   let tgTestState = $state<"idle" | "sending" | "ok" | "failed">("idle");
@@ -112,6 +115,28 @@
     } catch (e) {
       error = String(e);
       autostart = !autostart;
+    }
+  }
+
+  async function testAnalysis() {
+    const pending = pendingConfig();
+    if (!pending) return;
+    llmTestState = "running";
+    llmTestResult = null;
+    try {
+      if (apiKeyInput.trim()) {
+        await api.setLlmApiKey(apiKeyInput);
+        apiKeyInput = "";
+        apiKeySaved = true;
+      }
+      const analysis = await api.testLlm(pending);
+      llmTestState = "ok";
+      llmTestResult = `${analysis.description}${
+        analysis.ocr_text ? ` — OCR: “${analysis.ocr_text.slice(0, 120)}…”` : ""
+      } (${(analysis.latency_ms / 1000).toFixed(1)}s)`;
+    } catch (e) {
+      llmTestState = "failed";
+      llmTestResult = String(e);
     }
   }
 
@@ -328,10 +353,29 @@
             <input type="text" placeholder="e.g. moondream" bind:value={config.llm.model} />
           {/if}
           <small>
-            Recommended: moondream (small/fast) · qwen2.5vl:3b (balanced) ·
-            qwen2.5vl:7b (best OCR).
+            Must be a <strong>vision</strong> model — text/code models can't
+            read screenshots. Recommended: moondream (small/fast) ·
+            qwen2.5vl:3b (balanced) · qwen2.5vl:7b (best OCR).
           </small>
         </label>
+
+        <div class="test-row">
+          <button
+            type="button"
+            class="secondary"
+            onclick={testAnalysis}
+            disabled={llmTestState === "running"}
+          >
+            {llmTestState === "running"
+              ? "Analyzing… (can take a minute)"
+              : "Analyze latest capture"}
+          </button>
+        </div>
+        {#if llmTestState === "ok" && llmTestResult}
+          <span class="saved">Works ✓ — {llmTestResult}</span>
+        {:else if llmTestState === "failed" && llmTestResult}
+          <span class="test-failed">{llmTestResult}</span>
+        {/if}
       {/if}
     </section>
 

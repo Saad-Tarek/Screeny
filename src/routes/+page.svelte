@@ -10,6 +10,7 @@
   let lastError = $state<string | null>(null);
   let deliveryError = $state<string | null>(null);
   let lastDelivery = $state<string | null>(null);
+  let analysisError = $state<string | null>(null);
   let searchQuery = $state("");
   let searchResults = $state<CaptureRow[] | null>(null);
   let searchTimer: ReturnType<typeof setTimeout> | undefined;
@@ -116,9 +117,12 @@
       } else if (core.type === "capture_failed") {
         lastError = core.data.message;
       } else if (core.type === "analysis_completed") {
+        analysisError = null;
         captures = captures.map((c) =>
           c.id === core.data.capture_id ? { ...c, description: core.data.description } : c
         );
+      } else if (core.type === "analysis_failed") {
+        analysisError = core.data.message;
       } else if (core.type === "delivery_failed") {
         deliveryError = `${core.data.sink}: ${core.data.message}`;
         patchDeliveries(core.data.capture_ids, core.data.sink, "failed");
@@ -149,6 +153,16 @@
 {#if lastError}
   <div class="error">
     Capture problem: {lastError}
+  </div>
+{/if}
+{#if analysisError}
+  <div class="error">
+    AI analysis is failing (captures still work): {analysisError}
+    <br /><small>
+      Check Settings → AI analysis — the selected model must be a
+      <strong>vision</strong> model (e.g. Qwen2.5-VL, LLaVA, Moondream).
+      Use "Analyze latest capture" there to verify.
+    </small>
   </div>
 {/if}
 {#if deliveryError}

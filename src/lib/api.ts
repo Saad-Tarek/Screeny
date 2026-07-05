@@ -101,6 +101,13 @@ export interface DetectResult {
   lmstudio: string[] | null;
 }
 
+export interface Analysis {
+  model: string;
+  ocr_text: string;
+  description: string;
+  latency_ms: number;
+}
+
 export interface PullProgressEvent {
   model: string;
   status: string;
@@ -124,6 +131,7 @@ export const api = {
   setAutostart: (enabled: boolean) => invoke<void>("set_autostart", { enabled }),
   detectBackends: () => invoke<DetectResult>("detect_backends"),
   listModels: (config: Config) => invoke<string[]>("list_models", { config }),
+  testLlm: (config: Config) => invoke<Analysis>("test_llm", { config }),
   pullModel: (model: string) => invoke<void>("pull_model", { model }),
   searchCaptures: (query: string, limit?: number) =>
     invoke<CaptureRow[]>("search_captures", { query, limit }),

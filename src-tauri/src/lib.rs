@@ -81,6 +81,7 @@ pub fn run() {
             commands::get_autostart,
             commands::set_autostart,
             commands::detect_backends,
+            commands::test_llm,
             commands::list_models,
             commands::pull_model,
             commands::search_captures,

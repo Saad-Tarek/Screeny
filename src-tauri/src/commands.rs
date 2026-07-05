@@ -5,9 +5,9 @@ use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_autostart::ManagerExt;
 
 use screeny_core::{
-    backend_from_config, detect_local_backends, CaptureRow, Config, DetectResult, DiscoveredChat,
-    EmailSink, Engine, LlmBackendKind, OllamaBackend, RunState, Sink, TelegramSink, LLM_API_KEY,
-    SMTP_PASSWORD, TELEGRAM_BOT_TOKEN,
+    backend_from_config, capture, detect_local_backends, llm, Analysis, CaptureRow, Config,
+    DetectResult, DiscoveredChat, EmailSink, Engine, LlmBackendKind, OllamaBackend, RunState, Sink,
+    TelegramSink, LLM_API_KEY, SMTP_PASSWORD, TELEGRAM_BOT_TOKEN,
 };
 
 type EngineState<'a> = State<'a, Arc<Engine>>;
@@ -195,6 +195,42 @@ pub async fn pull_model(
                 },
             );
         })
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Run the vision model on the most recent capture with the pending
+/// (unsaved) settings — lets users verify their model actually works.
+#[tauri::command]
+pub async fn test_llm(engine: EngineState<'_>, config: Config) -> Result<Analysis, String> {
+    let config = config.sanitized();
+    if config.llm.model.is_empty() {
+        return Err("Pick a model first.".into());
+    }
+    let latest = engine
+        .store()
+        .list_captures(1, None)
+        .map_err(|e| e.to_string())?;
+    let Some(row) = latest.into_iter().next() else {
+        return Err("No captures yet — press \"Capture now\" on the dashboard first.".into());
+    };
+    let bytes = tokio::fs::read(&row.path)
+        .await
+        .map_err(|e| format!("read {}: {e}", row.path))?;
+    let small =
+        tauri::async_runtime::spawn_blocking(move || capture::downscale_for_llm(&bytes, 1280))
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())?;
+    let prompt = config
+        .llm
+        .prompt_override
+        .clone()
+        .filter(|p| !p.trim().is_empty())
+        .unwrap_or_else(|| llm::prompts::DEFAULT_PROMPT.to_string());
+    let backend = backend_from_config(&config.llm, engine.secrets().clone());
+    backend
+        .analyze(&small, &config.llm.model, &prompt)
         .await
         .map_err(|e| e.to_string())
 }
