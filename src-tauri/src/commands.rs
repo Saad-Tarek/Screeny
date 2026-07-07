@@ -278,6 +278,15 @@ pub async fn llm_api_key_set(engine: EngineState<'_>) -> Result<bool, String> {
         .map_err(|e| e.to_string())
 }
 
+/// Full analysis (description + OCR text) for one capture, for the detail view.
+#[tauri::command]
+pub fn get_analysis(engine: EngineState, capture_id: i64) -> Result<Option<Analysis>, String> {
+    engine
+        .store()
+        .get_analysis(capture_id)
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub fn list_captures(
     engine: EngineState,

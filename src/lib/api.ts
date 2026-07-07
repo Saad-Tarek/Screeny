@@ -123,6 +123,8 @@ export const api = {
   captureNow: () => invoke<void>("capture_now"),
   listCaptures: (limit?: number, beforeId?: number) =>
     invoke<CaptureRow[]>("list_captures", { limit, beforeId }),
+  getAnalysis: (captureId: number) =>
+    invoke<Analysis | null>("get_analysis", { captureId }),
   setEmailPassword: (password: string) =>
     invoke<void>("set_email_password", { password }),
   emailPasswordSet: () => invoke<boolean>("email_password_set"),

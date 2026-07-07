@@ -2,7 +2,7 @@
   import { onMount } from "svelte";
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import { convertFileSrc } from "@tauri-apps/api/core";
-  import { api, type CaptureRow, type CoreEvent } from "$lib/api";
+  import { api, type Analysis, type CaptureRow, type CoreEvent } from "$lib/api";
 
   const PAGE_SIZE = 60;
 
@@ -17,6 +17,29 @@
   let loadingMore = $state(false);
   let reachedEnd = $state(false);
   let capturing = $state(false);
+  let selected = $state<CaptureRow | null>(null);
+  let selectedAnalysis = $state<Analysis | null>(null);
+  let detailError = $state<string | null>(null);
+  let detailLoading = $state(false);
+
+  async function openCapture(row: CaptureRow) {
+    selected = row;
+    selectedAnalysis = null;
+    detailError = null;
+    detailLoading = true;
+    try {
+      selectedAnalysis = await api.getAnalysis(row.id);
+    } catch (e) {
+      detailError = String(e);
+    } finally {
+      detailLoading = false;
+    }
+  }
+
+  function closeCapture() {
+    selected = null;
+    selectedAnalysis = null;
+  }
 
   function timeOf(row: CaptureRow): string {
     return new Date(row.taken_at).toLocaleTimeString();
@@ -188,7 +211,7 @@
   {:else}
     <div class="grid">
       {#each searchResults as row (row.id)}
-        <figure class="card" title={row.path}>
+        <button class="card" title={row.path} onclick={() => openCapture(row)}>
           <img
             src={convertFileSrc(row.path)}
             alt={`Screenshot at ${timeOf(row)}`}
@@ -197,10 +220,10 @@
           {#if row.description}
             <p class="snippet">{row.description}</p>
           {/if}
-          <figcaption>
+          <div class="caption">
             <span>{dayOf(row)} {timeOf(row)}</span>
-          </figcaption>
-        </figure>
+          </div>
+        </button>
       {/each}
     </div>
   {/if}
@@ -218,7 +241,7 @@
       <h2 class="day">{group.day}</h2>
       <div class="grid">
         {#each group.rows as row (row.id)}
-          <figure class="card" title={row.path}>
+          <button class="card" title={row.path} onclick={() => openCapture(row)}>
             <img
               src={convertFileSrc(row.path)}
               alt={`Screenshot at ${timeOf(row)}`}
@@ -227,7 +250,7 @@
             {#if row.description}
               <p class="snippet">{row.description}</p>
             {/if}
-            <figcaption>
+            <div class="caption">
               <span>{timeOf(row)}</span>
               <span class="badges">
                 {#each badges(row) as badge (badge.sink)}
@@ -237,8 +260,8 @@
                 {/each}
                 <span class="dim">{row.width}×{row.height}</span>
               </span>
-            </figcaption>
-          </figure>
+            </div>
+          </button>
         {/each}
       </div>
     </section>
@@ -248,6 +271,49 @@
       {loadingMore ? "Loading…" : "Load older captures"}
     </button>
   {/if}
+{/if}
+
+<svelte:window onkeydown={(e) => e.key === "Escape" && closeCapture()} />
+
+{#if selected}
+  <div class="overlay">
+    <button class="backdrop" aria-label="Close capture details" onclick={closeCapture}></button>
+    <div class="detail" role="dialog" aria-modal="true" aria-label="Capture details">
+      <header class="detail-head">
+        <div>
+          <strong>{dayOf(selected)} {timeOf(selected)}</strong>
+          <span class="dim">
+            — {selected.monitor}, {selected.width}×{selected.height}
+          </span>
+        </div>
+        <button class="close" onclick={closeCapture} aria-label="Close">✕</button>
+      </header>
+      <div class="detail-body">
+        <img src={convertFileSrc(selected.path)} alt="Full-size capture" />
+        {#if detailLoading}
+          <p class="dim">Loading analysis…</p>
+        {:else if detailError}
+          <div class="error">Could not load the analysis: {detailError}</div>
+        {:else if selectedAnalysis}
+          <section>
+            <h3>AI description</h3>
+            <p class="detail-description">{selectedAnalysis.description}</p>
+          </section>
+          {#if selectedAnalysis.ocr_text}
+            <section>
+              <h3>On-screen text</h3>
+              <pre class="ocr">{selectedAnalysis.ocr_text}</pre>
+            </section>
+          {/if}
+          <p class="dim detail-meta">
+            Analyzed by {selectedAnalysis.model} in {(selectedAnalysis.latency_ms / 1000).toFixed(1)}s
+          </p>
+        {:else}
+          <p class="dim">No AI analysis for this capture.</p>
+        {/if}
+      </div>
+    </div>
+  </div>
 {/if}
 
 <style>
@@ -343,10 +409,20 @@
   }
   .card {
     margin: 0;
+    padding: 0;
+    display: block;
+    width: 100%;
+    text-align: left;
+    font: inherit;
+    color: inherit;
+    cursor: pointer;
     background: #171a21;
     border: 1px solid #262b36;
     border-radius: 10px;
     overflow: hidden;
+  }
+  .card:hover {
+    border-color: #39456b;
   }
   .card img {
     display: block;
@@ -355,11 +431,100 @@
     object-fit: cover;
     background: #0c0e12;
   }
-  figcaption {
+  .caption {
     display: flex;
     justify-content: space-between;
     padding: 7px 10px;
     font-size: 12px;
+  }
+  .overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 10;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 32px;
+  }
+  .backdrop {
+    position: absolute;
+    inset: 0;
+    background: #000000aa;
+    border: none;
+    cursor: default;
+  }
+  .detail {
+    position: relative;
+    background: #171a21;
+    border: 1px solid #2c3342;
+    border-radius: 12px;
+    width: min(860px, 100%);
+    max-height: 100%;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  .detail-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 12px 16px;
+    border-bottom: 1px solid #262b36;
+    font-size: 14px;
+  }
+  .close {
+    background: none;
+    border: none;
+    color: #aab2c3;
+    font-size: 15px;
+    padding: 4px 8px;
+    border-radius: 6px;
+    cursor: pointer;
+  }
+  .close:hover {
+    background: #1f2430;
+    color: #e6e8ee;
+  }
+  .detail-body {
+    padding: 16px;
+    overflow-y: auto;
+  }
+  .detail-body img {
+    display: block;
+    width: 100%;
+    border-radius: 8px;
+    background: #0c0e12;
+    margin-bottom: 14px;
+  }
+  .detail-body h3 {
+    font-size: 13px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: #8b93a7;
+    margin: 14px 0 6px;
+  }
+  .detail-description {
+    margin: 0;
+    font-size: 14px;
+    line-height: 1.55;
+  }
+  .ocr {
+    margin: 0;
+    padding: 12px;
+    background: #10131a;
+    border: 1px solid #262b36;
+    border-radius: 8px;
+    font-size: 13px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 300px;
+    overflow-y: auto;
+  }
+  .detail-meta {
+    font-size: 12px;
+    margin: 12px 0 0;
   }
   .dim {
     color: #7c8598;
