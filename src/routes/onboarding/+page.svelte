@@ -36,7 +36,7 @@
   let pullError = $state<string | null>(null);
 
   // finish step
-  let autostart = $state(true);
+  let autostart = $state(false);
   let finishing = $state(false);
 
   let unlistenCapture: UnlistenFn | undefined;

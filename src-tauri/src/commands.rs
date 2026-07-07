@@ -94,6 +94,13 @@ pub fn get_autostart(app: AppHandle) -> Result<bool, String> {
 
 #[tauri::command]
 pub fn set_autostart(app: AppHandle, enabled: bool) -> Result<(), String> {
+    // A dev binary registered at login launches without its dev server and
+    // fails to start. Only installed (release) builds may enable autostart.
+    if enabled && cfg!(debug_assertions) {
+        return Err(
+            "Autostart is only available in the installed app, not in development mode.".into(),
+        );
+    }
     let launcher = app.autolaunch();
     if enabled {
         launcher.enable().map_err(|e| e.to_string())
