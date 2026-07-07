@@ -18,6 +18,9 @@ jobs:
   release:
     strategy:
       fail-fast: false
+      # Serialized: parallel jobs race on uploading the shared latest.json
+      # release asset ("already_exists" API errors).
+      max-parallel: 1
       matrix:
         include:
           - platform: windows-latest
