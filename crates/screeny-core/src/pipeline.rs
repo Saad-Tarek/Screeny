@@ -543,12 +543,29 @@ async fn deliver_with_retry(
     });
 }
 
-/// Hourly retention pass: drop DB rows past the cutoff and their files.
+/// Hourly maintenance pass (the first tick fires immediately at startup):
+/// reconcile the archive with the filesystem, then apply retention.
 async fn prune_loop(config_rx: watch::Receiver<Config>, store: Arc<Store>) {
     let mut ticker = tokio::time::interval(Duration::from_secs(60 * 60));
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
     loop {
         ticker.tick().await;
+        // Drop archive rows whose image files were deleted outside the app
+        // (manual cleanup, disk tools); they would render as broken thumbnails.
+        let scan_store = store.clone();
+        match tokio::task::spawn_blocking(move || {
+            crate::maintenance::remove_stale_captures(&scan_store)
+        })
+        .await
+        {
+            Ok(Ok(count)) if count > 0 => {
+                info!(count, "removed captures whose files were deleted on disk");
+            }
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => warn!(error = %e, "stale-capture cleanup failed"),
+            Err(e) => warn!(error = %e, "stale-capture cleanup task failed"),
+        }
+
         let retention_days = config_rx.borrow().capture.retention_days;
         let Some(days) = retention_days else { continue };
         let cutoff = Utc::now() - ChronoDuration::days(i64::from(days));

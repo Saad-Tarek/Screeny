@@ -225,6 +225,60 @@ impl Store {
         conn.execute("DELETE FROM captures WHERE taken_at < ?1", params![cutoff])?;
         Ok(paths)
     }
+
+    /// Fetch one capture's stored analysis, if any.
+    pub fn get_analysis(&self, capture_id: i64) -> Result<Option<crate::llm::Analysis>> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT model, ocr_text, description, latency_ms
+             FROM analyses WHERE capture_id = ?1",
+        )?;
+        let mut rows = stmt.query_map(params![capture_id], |r| {
+            Ok(crate::llm::Analysis {
+                model: r.get(0)?,
+                ocr_text: r.get(1)?,
+                description: r.get(2)?,
+                latency_ms: r.get::<_, i64>(3)? as u64,
+            })
+        })?;
+        Ok(rows.next().transpose()?)
+    }
+
+    /// (id, path) of every capture, for filesystem reconciliation.
+    pub fn capture_paths(&self) -> Result<Vec<(i64, String)>> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let mut stmt = conn.prepare("SELECT id, path FROM captures")?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Delete the given captures along with their FTS index entries; analyses
+    /// and deliveries follow via ON DELETE CASCADE.
+    pub fn delete_captures(&self, ids: &[i64]) -> Result<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let mut conn = self.conn.lock().expect("store mutex poisoned");
+        let tx = conn.transaction()?;
+        {
+            // Contentless FTS5 only deletes a row when given the original
+            // column values; they live in the analyses table.
+            let mut fts = tx.prepare(
+                "INSERT INTO captures_fts (captures_fts, rowid, ocr_text, description)
+                 SELECT 'delete', capture_id, ocr_text, description
+                 FROM analyses WHERE capture_id = ?1",
+            )?;
+            let mut del = tx.prepare("DELETE FROM captures WHERE id = ?1")?;
+            for id in ids {
+                fts.execute(params![id])?;
+                del.execute(params![id])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -330,6 +384,67 @@ mod tests {
 
         let removed = store.prune_older_than(now - Duration::days(30)).unwrap();
         assert_eq!(removed, vec!["old.jpg".to_string()]);
+        assert_eq!(store.capture_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn capture_paths_returns_id_path_pairs() {
+        let store = Store::open_in_memory().unwrap();
+        let a = store
+            .insert_capture(&capture_at(Utc::now(), "a.jpg"))
+            .unwrap();
+        let b = store
+            .insert_capture(&capture_at(Utc::now(), "b.jpg"))
+            .unwrap();
+        let paths = store.capture_paths().unwrap();
+        assert_eq!(paths, vec![(a.id, "a.jpg".into()), (b.id, "b.jpg".into())]);
+    }
+
+    #[test]
+    fn delete_captures_removes_rows_deliveries_and_fts_entries() {
+        let store = Store::open_in_memory().unwrap();
+        let keep = store
+            .insert_capture(&capture_at(Utc::now(), "keep.jpg"))
+            .unwrap();
+        let gone = store
+            .insert_capture(&capture_at(Utc::now(), "gone.jpg"))
+            .unwrap();
+        for row in [&keep, &gone] {
+            store
+                .insert_analysis(
+                    row.id,
+                    &crate::llm::Analysis {
+                        model: "m".into(),
+                        ocr_text: format!("token_{}", row.id),
+                        description: "A screen.".into(),
+                        latency_ms: 1,
+                    },
+                )
+                .unwrap();
+        }
+        store
+            .record_delivery(&[gone.id], "email", "sent", None)
+            .unwrap();
+
+        store.delete_captures(&[gone.id]).unwrap();
+
+        assert_eq!(store.capture_count().unwrap(), 1);
+        let listed = store.list_captures(10, None).unwrap();
+        assert_eq!(listed[0].path, "keep.jpg");
+        // FTS entry for the deleted capture is gone; the kept one still hits.
+        assert!(store
+            .search_captures(&format!("token_{}", gone.id), 10)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            store
+                .search_captures(&format!("token_{}", keep.id), 10)
+                .unwrap()
+                .len(),
+            1
+        );
+        // Deleting nothing is a no-op.
+        store.delete_captures(&[]).unwrap();
         assert_eq!(store.capture_count().unwrap(), 1);
     }
 }

@@ -6,6 +6,7 @@ pub mod capture;
 pub mod config;
 pub mod error;
 pub mod llm;
+pub mod maintenance;
 pub mod pipeline;
 pub mod secrets;
 pub mod sinks;
