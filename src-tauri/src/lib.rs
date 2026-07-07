@@ -32,6 +32,8 @@ pub fn run() {
             None,
         ))
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
@@ -75,6 +77,7 @@ pub fn run() {
             commands::set_run_state,
             commands::capture_now,
             commands::list_captures,
+            commands::get_analysis,
             commands::set_email_password,
             commands::email_password_set,
             commands::test_email,
